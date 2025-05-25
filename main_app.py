@@ -24,7 +24,7 @@ import vga1_16x16 as font_lg
 import vga1_16x32 as font_huge
 
 # === Software Version ===
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 # ========================
 
 # === Definitons for Wifi Setup and Access ===
