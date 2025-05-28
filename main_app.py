@@ -15,6 +15,7 @@ from phew import logging
 from phew.server import Response
 import ujson as json
 import os
+import ure  # MicroPython’s regex module
 import _thread
 import socket # temporary for troubleshooting
 # Imports for round color tft display
@@ -40,6 +41,8 @@ SYNC_INTERVAL = 3600 # Sync to NTP time server every hour
 WEATH_INTERVAL = 300 # Update weather every 5 mins
 last_sync = 0
 last_weather_update = 0
+press_time = None
+long_press_triggered = False
 start_update_requested = False
 continue_requested = False
 UPLOAD_TEMP_SUFFIX = ".tmp"
@@ -217,13 +220,26 @@ def setup_sw_handler(pin):
 setup_sw.irq(trigger=machine.Pin.IRQ_FALLING | machine.Pin.IRQ_RISING, handler=setup_sw_handler)
     
 # === Set correct time from NTP server ===
-def sync_time():
-    try:
-        print("Syncing time with NTP server...")
-        ntptime.settime()  # This sets the RTC from the network time
-        print("Time synced successfully!")
-    except Exception as e:
-        print(f"Failed to sync time: {e}")
+#def sync_time():
+#    try:
+#        print("Syncing time with NTP server...")
+#        ntptime.settime()  # This sets the RTC from the network time
+#        print("Time synced successfully!")
+#    except Exception as e:
+#        print(f"Failed to sync time: {e}")
+
+def sync_time(max_retries=3, delay=3):
+    for attempt in range(1, max_retries + 1):
+        try:
+            print("Syncing time with NTP server...")
+            ntptime.settime()
+            print("Time sync successful.")
+            return True
+        except Exception as e:
+            print(f"Failed to sync time (attempt {attempt}): {e}")
+            time.sleep(delay)
+    print("Time sync failed after retries.")
+    return False
         
 def is_daytime():
 #    t = time.localtime()
@@ -232,9 +248,43 @@ def is_daytime():
     return 7 <= hour < 19  # Define day as between 7am and 7pm (0700 to 1900)
         
 # === Calculate correct local time ===
+#def localtime_with_offset():
+#    t = time.mktime(time.localtime())  # seconds since epoch UTC
+#    t += UTC_OFFSET                    # add offset seconds
+#    return time.localtime(t)
+
+#def localtime_with_offset():
+#    t = time.mktime(time.gmtime())  # UTC epoch seconds
+#    offset_seconds = int(gmt_offset * 3600)
+#    t += offset_seconds
+#    return time.localtime(t)
+
 def localtime_with_offset():
-    t = time.mktime(time.localtime())  # seconds since epoch UTC
-    t += UTC_OFFSET                    # add offset seconds
+    """
+    Return local time.struct_time adjusted from UTC using raw_offset and DST.
+    DST logic is based on US rules.
+    """
+    now = time.gmtime()
+    month = now[1]
+    mday = now[2]
+    weekday = now[6]  # 0 = Monday, 6 = Sunday
+
+    def is_us_dst(month, mday, weekday):
+        if month < 3 or month > 11:
+            return False
+        if 3 < month < 11:
+            return True
+        if month == 3:
+            return mday - weekday >= 8  # 2nd Sunday or later
+        if month == 11:
+            return mday - weekday < 1  # before 1st Sunday
+        return False
+
+    offset = gmt_offset
+    if is_us_dst(month, mday, weekday):
+        offset += 1  # apply DST
+
+    t = time.mktime(time.gmtime()) + int(offset * 3600)
     return time.localtime(t)
 
 def update_time_only(time_str):
@@ -272,21 +322,24 @@ def get_icon_filename(simplified_now, day):
 
     if "sun" in f or "clear" in f:
         icon_filename = "icons/clear_day_rgb565.raw" if day else "icons/clear_night_rgb565.raw"
-    elif "partly cloudy" in f or "p cloudy" in f or "m cloudy" in f:
+    elif "partly cloudy" in f or "mostly cloudy" in f or "p cloudy" in f or "m cloudy" in f:
         icon_filename = "icons/part_cloudy_day_rgb565.raw" if day else "icons/part_cloudy_night_rgb565.raw"
     elif "tstorms" in f or "thunderstorm" in f or "thunderstorms" in f or "t-storm" in f:
         icon_filename = "icons/tstorm_rgb565.raw"
     elif "cloud" in f or "overcast" in f:
         icon_filename = "icons/cloudy_rgb565.raw"
     elif "rain" in f or "showers" in f or "drizzle" in f:
-        icon_filename = "icons/rain_rgb565.raw"
+         icon_filename = "icons/rain_rgb565.raw"
     elif "fog" in f or "haze" in f:
         icon_filename = "icons/fog_rgb565.raw"
-    elif "snow" in f or "flurries" in f or "sleet" in f:
+    elif "snow" in f or "flurries" in f or "sleet" in f or "hail" in f:
         icon_filename = "icons/snow_rgb565.raw"
     elif "wind" in f:
         icon_filename = "icons/windy_rgb565.raw"
-
+    # If nothing matches, show clear icon (NOTE: CHANGE TO SOMETHING ELSE, smiley, world, etc)
+    else:
+        icon_filename = "icons/clear_day_rgb565.raw"
+    
     print(f"Icon filename selected: {icon_filename}")
     return icon_filename
 
@@ -302,14 +355,14 @@ def draw_weather_icon(gc9a01, simplified_now, x, y):
                 icon_data = f.read()
 
             # Scale icon 2x larger
-            scaled_icon_data, sw, sh = scale_rgb565_2x(icon_data, 32, 32)
+#            scaled_icon_data, sw, sh = scale_rgb565_2x(icon_data, 32, 32)
 
             # Apply color to icon
-            WHITE = 0xFFFF
-            NEW_COLOR = rgb888_to_rgb565(100, 200, 255)  # Light blue
-            colored_icon = replace_color_rgb565(scaled_icon_data, WHITE, NEW_COLOR)
+#            WHITE = 0xFFFF
+#            NEW_COLOR = rgb888_to_rgb565(100, 200, 255)  # Light blue
+#            colored_icon = replace_color_rgb565(scaled_icon_data, WHITE, NEW_COLOR)
 
-            gc9a01.blit_buffer(colored_icon, x, y, sw, sh)
+            gc9a01.blit_buffer(icon_data, x, y, 64, 64)
 
         except OSError:
             gc9a01.text(font_lg, "Err", x, y, color565(255, 0, 0))
@@ -374,7 +427,43 @@ def center_hugetext(text, y, fg=color565(255,255,255), bg=color565(0,0,0)):
         return
     x = (240 - visible_width) // 2 + (visible_width - text_width) // 2
     display.text(font_huge, text, x, y, fg, bg)
-    
+
+def display_raw_image_in_chunks(display, filepath, x, y, width, height, chunk_rows=8, clear_color=0x0000, clear=True):
+    """
+    Streams a raw RGB565 image to the GC9A01 display in chunks using blit_buffer().
+
+    Args:
+        display:     Initialized GC9A01 display object.
+        filepath:    Path to the .raw RGB565 image file.
+        x, y:        Top-left position on the screen to draw the image.
+        width:       Width of the image in pixels.
+        height:      Height of the image in pixels.
+        chunk_rows:  Number of rows per chunk (default: 8).
+        clear_color: Optional background color (default: black).
+        clear:       If True, clear the screen before drawing.
+    """
+    import gc
+
+    bytes_per_pixel = 2
+    row_bytes = width * bytes_per_pixel
+
+    if clear:
+        display.fill(clear_color)
+
+    try:
+        with open(filepath, "rb") as f:
+            for row_start in range(0, height, chunk_rows):
+                actual_rows = min(chunk_rows, height - row_start)
+                chunk_size = actual_rows * row_bytes
+                chunk_data = f.read(chunk_size)
+
+                display.blit_buffer(chunk_data, x, y + row_start, width, actual_rows)
+
+                gc.collect()
+
+    except Exception as e:
+        print("Error displaying image:", e)
+
 # === Determine latitude and longitude from zip code ===
 def get_lat_lon(zip_code, country_code="us"):
     url = f"http://api.zippopotam.us/{country_code}/{zip_code}"
@@ -392,6 +481,139 @@ def get_lat_lon(zip_code, country_code="us"):
         print("Failed to get lat/lon:", e)
     return None, None
 
+def extract_first_json_string_value(raw_json, key):
+    """
+    Extracts the first string value for a given key in raw JSON text.
+    Returns the string value, or None if not found.
+    
+    This is lightweight and avoids parsing large JSON structures.
+    """
+    search_key = f'"{key}"'
+    idx = raw_json.find(search_key)
+    if idx == -1:
+        return None
+
+    # Find the colon separating key and value
+    colon_idx = raw_json.find(":", idx + len(search_key))
+    if colon_idx == -1:
+        return None
+
+    # Find the surrounding double quotes around the string value
+    start_quote = raw_json.find('"', colon_idx + 1)
+    if start_quote == -1:
+        return None
+    end_quote = raw_json.find('"', start_quote + 1)
+    if end_quote == -1:
+        return None
+
+    return raw_json[start_quote + 1:end_quote]
+
+def extract_first_json_string_value_stream(response_stream, key):
+    """
+    Stream‐parse response_stream for the first JSON string field "key":"value"
+    without loading the full response into RAM.
+    """
+    key_bytes = b'"' + key.encode("utf-8") + b'":"'
+    buf = b""
+    max_buf = 1024
+
+    while True:
+        chunk = response_stream.read(128)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > max_buf:
+            buf = buf[-max_buf:]
+        idx = buf.find(key_bytes)
+        if idx != -1:
+            start = idx + len(key_bytes)
+            end = buf.find(b'"', start)
+            if end != -1:
+                return buf[start:end].decode("utf-8")
+    return None
+
+def fetch_first_station_id(obs_station_url, headers):
+    """
+    Stream‐parse the /stations FeatureCollection for the first feature.id
+    that contains '/stations/', extracting the station code at the end.
+    """
+    print("Fetching observation stations list…")
+    r = urequests.get(obs_station_url, headers=headers)
+    stream = r.raw
+
+    buf = b""
+    key = b'"id":'
+    max_buf = 4096  # keep up to 4 KB in memory
+
+    while True:
+        chunk = stream.read(256)
+        if not chunk:
+            break
+        buf += chunk
+        # Trim buffer
+        if len(buf) > max_buf:
+            buf = buf[-max_buf:]
+
+        # Look for `"id":` in buffer
+        idx = buf.find(key)
+        if idx != -1:
+            # Find the opening quote for the URL
+            start_quote = buf.find(b'"', idx + len(key))
+            if start_quote != -1:
+                end_quote = buf.find(b'"', start_quote + 1)
+                if end_quote != -1:
+                    url = buf[start_quote + 1:end_quote].decode("utf-8")
+                    # Only accept URLs that point to a station
+                    if "/stations/" in url:
+                        station_id = url.rsplit("/", 1)[-1]
+                        print("Extracted station_id:", station_id)
+                        r.close()
+                        gc.collect()
+                        return station_id
+                    # otherwise keep searching after this index
+                    buf = buf[end_quote+1:]
+    r.close()
+    gc.collect()
+    print("Failed to extract stationIdentifier from stream.")
+    return None
+
+def extract_first_number_stream_generic(stream, pattern):
+    """
+    Stream-parse `stream` to find the first numeric value matching `pattern`.
+    - stream: a file-like object supporting .read()
+    - pattern: a bytes regex with one capture group for the number, e.g.
+        rb'"temperature"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
+        rb'"relativeHumidity"\s*:\s*\{[^}]*"value"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
+    Returns:
+      float(parsed_number) on success,
+      None if no match or parse error.
+    """
+    buf = b""                         # rolling buffer of recent bytes
+    max_buf = 4096                    # cap buffer at 4 KB to limit RAM use
+    prog = ure.compile(pattern)       # compile the regex once
+
+    while True:
+        chunk = stream.read(256)      # read small 256-byte chunks
+        if not chunk:
+            break                     # end of stream
+
+        buf += chunk
+        if len(buf) > max_buf:
+            buf = buf[-max_buf:]      # drop oldest data beyond 4 KB
+
+        m = prog.search(buf)          # search buffer for the pattern
+        if m:
+            # m.group(1) is the first capture—our numeric string
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
+
+    return None                       # no match found
+
+def titlecase(s):
+    return ' '.join(word.capitalize() for word in s.split())
+
 # === Weather Setup ===
 #LAT = 41.4815
 #LON = -73.2132
@@ -401,151 +623,264 @@ def get_weather_data(lat, lon):
     try:
         headers = {"User-Agent": USER_AGENT}
 
-        # Step 1: Get forecast and observation stations
+        # Step 1: Get point data - forecast and observation stations
+        print("fetching URL:", f"https://api.weather.gov/points/{lat},{lon}")
         r = urequests.get(f"https://api.weather.gov/points/{lat},{lon}", headers=headers)
-        point_data = r.json()
+        raw = r.text
+        print("Downloaded length:", len(raw))  # Debug: size of JSON string
         r.close()
-        gc.collect()
 
+        # Parse full JSON only after raw text is safely loaded
+        point_data = json.loads(raw)
+        
+        print("Keys in point_data:", list(point_data.keys()))  # Debug keys in JSON
+
+        # Extract only the needed URLs to minimize retained data in memory
         forecast_url = point_data["properties"]["forecast"]
         obs_station_url = point_data["properties"]["observationStations"]
-        del point_data  # free memory
-        gc.collect()
+        forecast_hourly_url = point_data["properties"].get("forecastHourly")
+        
+        # Directly extract grid identifiers for constructing hourly URLs
+        office = point_data["properties"]["gridId"]
+        grid_x = point_data["properties"]["gridX"]
+        grid_y = point_data["properties"]["gridY"]
 
-        # Step 2: Get observation stations list
-        r = urequests.get(obs_station_url, headers=headers)
-        stations_data = r.json()
-        r.close()
-        gc.collect()
-
-        features = stations_data.get("features", [])
-        if not features:
-            return None
-        station_id = features[0]["properties"]["stationIdentifier"]
-        del stations_data, features  # free memory
-        gc.collect()
-
-        # Step 3: Get latest observations
-        obs_url = f"https://api.weather.gov/stations/{station_id}/observations/latest"
-        r = urequests.get(obs_url, headers=headers)
-        obs_data = r.json()
-        r.close()
-        gc.collect()
-
-        obs = obs_data.get("properties", {})
-        del obs_data
-        gc.collect()
-
-        temp_c = obs.get("temperature", {}).get("value", None)
-        humidity = obs.get("relativeHumidity", {}).get("value", None)
-
-        if temp_c is not None:
-            temp_f = round(temp_c * 9 / 5 + 32)
+        # Build the base gridpoint URL
+        gridpoint_url      = f"https://api.weather.gov/gridpoints/{office}/{grid_x},{grid_y}"
+        
+        # Choose the best available hourly forecast URL
+        if not forecast_hourly_url:
+            print("No forecastHourly URL found in point data; falling back to constructed gridpoint URL.")
+            hourly_url = gridpoint_url + "/forecast/hourly"
         else:
-            temp_f = None
+            hourly_url = forecast_hourly_url  # NOTE: Use hourly_url, NOT gridpoint or forecast_hourly
+        
+        # Clean up the large JSON object ASAP
+        del point_data
+        gc.collect()
 
-        # Get forecast data
-        r = urequests.get(forecast_url, headers=headers)
-        forecast_data = r.json()
+        # Step 2: Get observation stations list for the location
+        print("Fetching URL:", obs_station_url)
+
+        # Use the helper to extract the first stationIdentifier
+        station_id = fetch_first_station_id(obs_station_url, headers)
         r.close
         gc.collect()
+        # If not found, return None to indicate failure
+        if not station_id:
+            temp_c = humidity = None
+            return None
+
+        # Free memory
+        del raw
+        gc.collect()
+
+        # Step 3 - Fetch latest observations
+        temp_c = None
+        temp_f = None
+        humidity = None
+
+        station_url =  f"https://api.weather.gov/stations/{station_id}/observations/latest"
+        print("Fetching URL:", station_url)
+
+        try:
+            r = urequests.get(station_url, headers=headers)
+            raw = r.text
+            print("Downloaded length (obs):", len(raw))
+            r.close()
+
+            obs_json = json.loads(raw)
+
+            temp_c = obs_json["properties"]["temperature"]["value"]
+            print("Parsed Temperature (°C):", temp_c)
+
+            humidity = obs_json["properties"]["relativeHumidity"]["value"]
+            print("Parsed Humidity (%):", humidity)
+
+            del raw
+            del obs_json
+            gc.collect()
+
+            if temp_c is not None:
+                temp_f = round(temp_c * 9 / 5 + 32)
+
+        except Exception as e:
+            print("Error fetching or parsing observation data:", e)
+
+        # Fallback to hourly forecast if needed
         
-        forecast = "N/A"
-        periods = forecast_data.get("properties", {}).get("periods", {})
-        if periods:
-            forecast = periods[0].get("shortForecast", "N/A")
+        # +++ TEST ++++
+        #temp_c = None  # Set to None to test hourly_forecast fetch
+        #humidity = None # Set to None to test hourly_forecast fetch
+        # +++ TEST ++++
+        
+        if temp_c is None or humidity is None:
+            print("Falling back to hourly forecast for missing data...")
+            print("Fetching URL:", hourly_url)
             
+            # Pattern to match a flat "temperature": 72  (first occurrence)
+            pattern_temp = rb'"temperature"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
+ 
+            try:
+                r = urequests.get(hourly_url, headers=headers)
+                temp_f_fb = extract_first_number_stream_generic(r.raw, pattern_temp)
+                r.close()
+                gc.collect()
+                print("Stream-fallback Temp (°F):", temp_f_fb)
+
+                if temp_c is None:
+                    if isinstance(temp_f_fb, float):
+                        temp_f = round(temp_f_fb)
+                        temp_c = round((temp_f_fb - 32) * 5 / 9)
+                    else:
+                        temp_f = 0
+                        temp_c = 0
+                        print("Stream fallback didn’t find valid temperature; defaulting to 0.")
+
+            except Exception as e:
+                print("Error streaming temperature fallback:", e)
+                temp_c = temp_f = 0
+
+            # Pattern to match the nested "relativeHumidity": { … "value": 54 }
+            pattern_hum = rb'"relativeHumidity"\s*:\s*\{[^}]*"value"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
+
+            try:
+                # --- Humidity fallback (%) ---
+                r = urequests.get(hourly_url, headers=headers)
+                humidity_fb = extract_first_number_stream_generic(r.raw, pattern_hum)
+                r.close()
+                gc.collect()
+                print("Stream-fallback Humidity (%):", humidity_fb)
+                
+                if humidity is None:
+                    if isinstance(humidity_fb, float):
+                        humidity = int(humidity_fb)
+                    else:
+                        print("Stream fallback didn’t find valid humidity; defaulting to 0.")
+                        humidity = 0
+
+            except Exception as e:
+                print("Error streaming humidity fallback:", e)
+                humidity = 0
+
+        # Final safety check
+        if temp_f is None:
+            temp_f = 0
+        if humidity is None:
+            humidity = 0
+
+        # Step 4: Get forecast data
+        print("Fetching URL:", forecast_url)
+        r = urequests.get(forecast_url, headers=headers)
+        raw_forecast = r.text
+        print("Downloaded length (forecast):", len(raw_forecast))
+        r.close()
+
+        # Extract shortForecast from first forecast period
+        forecast = extract_first_json_string_value(raw_forecast, "shortForecast")
+        if not forecast:
+            forecast = "N/A"
+
+        # Free memory from forecast JSON
+        del raw_forecast
+        gc.collect()
+
+        # Return the final values
         return temp_f, humidity, forecast
 
     except Exception as e:
         print("Error:", e)
+        sys.print_exception(e)
         return None
 
 
 def simplify_forecast(forecast):
-    MODIFIERS = {
-        "mostly": "M",
-        "partly": "P",
-        "chance": "Chc",
-        "slight chance": "Chc"
-    }
+    MODIFIERS = ["Slight Chance", "Chance", "Mostly", "Partly", "Likely", "Isolated"]
+    CONDITIONS = [
+        "Tornado", "Hailstorm", "Hailstorms", "Blizzard",
+        "Freezing Rain", "Freezing Drizzle", "Hail", "Sleet", "Ice", "Frost",
+        "Flash Flood", "Flood", "Dust Storm", "Smoke", "Volcanic Ash",
+        "Hurricane", "Tropical storm", 
+        "Thunderstorms", "T-storms", "Tstorms",
+        "Storm", "Showers", "Rain",
+        "Fog", "Snow", "Clear", "Sunny",
+        "Cloudy", "Windy", "Gusty", "Wind", "Drizzle",
+        "Haze"
+    ]
+    # First, make sure there is a valid forecast
+    if not forecast or not isinstance(forecast, str):
+        return "N/A"
+    # Define priority by order in CONDITIONS list (lower index = higher priority)
+    # Find highest priority condition (lowest index in CONDITIONS)
 
-    CONDITIONS = {
-        "thunderstorms": "Tstorms",
-        "t-storms": "Tstorms",
-        "tstorms": "Tstorms",
-        "sunny": "Sunny",
-        "cloudy": "Cloudy",
-        "rain": "Rain",
-        "showers": "Rain",  # simplify Showers to Rain
-        "fog": "Fog",
-        "snow": "Snow",
-        "clear": "Clear",
-        "wind": "Wind",
-        "drizzle": "Drizzle",
-        "storm": "Storm",
-        "sleet": "Sleet",
-        "haze": "Haze"
-    }
-
-    def simplify_phrase(text):
-        text = text.lower()
-        mod_abbr = ""
-        cond_abbr = ""
-
-        # Check for modifiers first - longest first to catch "slight chance"
-        for mod_full in sorted(MODIFIERS.keys(), key=len, reverse=True):
-            if mod_full in text:
-                mod_abbr = MODIFIERS[mod_full]
-                break
-
-        # Check for condition keywords
-        for cond_full in CONDITIONS:
-            if cond_full in text:
-                cond_abbr = CONDITIONS[cond_full]
-                break
-
-        # If no condition found, fallback to truncated original text capitalized
-        if not cond_abbr:
-            return text[:8].capitalize()
-
-        # Combine modifier + condition, max 8 chars total
-        if mod_abbr:
-            combined = f"{mod_abbr} {cond_abbr}"
-        else:
-            combined = cond_abbr
-
-        return combined[:8]
-
-    # Split forecast into parts by known separators
-    separators = [" then ", ";", ","]
-    parts = [forecast]
-
-    for sep in separators:
+    # Cut off forecast at any strong separator (only use "current" condition)
+    for sep in [" then ", ";", ","]:
         if sep in forecast.lower():
-            parts = [p.strip() for p in forecast.lower().split(sep)]
+            forecast = forecast.lower().split(sep, 1)[0]
             break
 
-    # Simplify each part (max 2 parts)
-    simplified = [simplify_phrase(p) for p in parts[:2]]
+    forecast = forecast.strip().lower()
 
-    return simplified
+    found_modifiers = []
+    found_conditions = []
+
+    # Find all modifiers present with positions
+    for mod in MODIFIERS:
+        pos = forecast.find(mod.lower())
+        if pos != -1:
+            found_modifiers.append((pos, mod))
+
+    # Find all conditions present with positions
+    for cond in CONDITIONS:
+        pos = forecast.find(cond.lower())
+        if pos != -1:
+            found_conditions.append((pos, cond))
+
+    # Pick earliest modifier if any
+    found_modifiers.sort(key=lambda x: x[0])
+    found_modifier = found_modifiers[0][1] if found_modifiers else ""
+
+    # Pick highest priority condition present:
+    # conditions with lowest index in CONDITIONS list are highest priority
+    priority_found_conditions = [(CONDITIONS.index(cond), pos, cond)
+                                 for pos, cond in found_conditions if cond in CONDITIONS]
+    priority_found_conditions.sort()  # sorts by priority index, then position, then cond
+    found_condition = priority_found_conditions[0][2] if priority_found_conditions else ""
+
+    # Special rules for modifiers + thunderstorms
+    if found_modifier.lower() in ["chance", "likely"] and found_condition.lower() in ["thunderstorms", "t-storms", "tstorms"]:
+        found_condition = "Tstorms"
+    if found_modifier.lower() == "isolated" and found_condition.lower() in ["showers", "thunderstorms", "t-storms", "tstorms"]:
+        found_modifier = "Isol"
+
+    phrase = f"{found_modifier} {found_condition}".strip()
+
+    if not found_condition and not found_modifier:
+        # Fallback: just use first 14 chars of forecast, capitalized
+        print("forecast:", forecast, "| type:", type(forecast))
+        print("phrase:", phrase, "| type:", type(phrase))
+        s = forecast[:14]
+        return s[0].upper() + s[1:] if s else s
+    
+    # Return capitalized short forecast, <modifier> <condition>, truncated to 14 chars
+    print("phrase:", phrase, "| type:", type(phrase))
+    return phrase[:14]
+
     
 def display_weather(temp, humidity, forecast):
     # Clear only the areas we'll update (not the whole screen)
 #     display.fill_rect(0, 0, 240, 60, color565(0, 0, 0))     # header
     display.fill_rect(0, 60, 240, 180, color565(0, 0, 0))   # lower part
     
-    lines = simplify_forecast(forecast)
+    line = simplify_forecast(forecast)
     icon_x = (240 - 64) // 2
-    draw_weather_icon(display, lines[0], icon_x, 60)    
-    if len(lines) == 2:
-        center_lgtext(f"Now:{lines[0]}", 130, color565(255, 255, 0))
-        center_lgtext(f"Later:{lines[1]}", 150, color565(255, 255, 0))
-    else:
-        center_lgtext(lines[0], 140, color565(255, 255, 0))
+    draw_weather_icon(display, line, icon_x, 70)    
+    # Display 14 character weather conditions
+    
+    center_lgtext(line, 140, color565(255, 255, 0))
 
-    display.text(font_huge, f"{temp}F", 50, 170, color565(255, 100, 100))
+    display.text(font_huge, f"{temp}F", 50, 170, color565(255, 100, 100))  # pass in 8-bit RGB
+    #display.text(font_huge, f"{temp}F", 50, 170, 0xfa45)  # Pass in rgb565
     display.text(font_huge, f"{int(humidity)}%", 130, 170, color565(100, 255, 100))
     
 def format_12h_time(t):
@@ -561,12 +896,15 @@ def format_12h_time(t):
         am_pm = "PM"
     else:
         hour_12 = hour
-    return "{:2d}:{:02d}:{:02d} {}".format(hour_12, t[4], t[5], am_pm)
-
+    # Return H:M:S AM/PM
+#    return "{:2d}:{:02d}:{:02d} {}".format(hour_12, t[4], t[5], am_pm)
+    # Return H:M AM/PM
+    return "{:2d}:{:02d} {}".format(hour_12, t[4], am_pm)
 # === Weather Program ===
 def application_mode(zip_code):
     print("Entering application mode.")
     global start_update_requested
+    global gmt_offset
 #    onboard_led = machine.Pin("LED", machine.Pin.OUT)
 #    setup_wifi_sw = machine.Pin(5, machine.Pin.IN)
 
@@ -583,6 +921,15 @@ def application_mode(zip_code):
     lat, lon = get_lat_lon(zip_code)
     print("Latitude:", lat)
     print("Longitude:", lon)
+    
+    # Get time zone UTC offset from lat and lon
+    username = "phonorad"  #GeoNames username
+    url = f"http://api.geonames.org/timezoneJSON?lat={lat}&lng={lon}&username={username}"
+    response = urequests.get(url)
+    data = response.json()
+    gmt_offset = data.get("gmtOffset")
+    print(data)
+    print(f"GMT Offset: {gmt_offset} hours")
 
     # Initial weather fetch
     new_data = get_weather_data(lat, lon)
@@ -665,26 +1012,35 @@ try:
             print("Setup switch ")
             os.remove(SETTINGS_FILE)
             machine_reset()
+    # Display P&L Logo
+    print("displaying logo")
+    image_path = "/icons/pl_logo_240x240_rgb565.raw"
+    display_raw_image_in_chunks(display, image_path, 0, 0, 240, 240)
+    time.sleep(5)
     
     with open(SETTINGS_FILE) as f:
         wifi_current_attempt = 1
         settings = json.load(f)
-        while (wifi_current_attempt < WIFI_MAX_ATTEMPTS):
+        while (wifi_current_attempt <= WIFI_MAX_ATTEMPTS):
             print(settings['ssid'])
             print(settings['password'])
             print(settings['zip'])
+            print(f"Connecting to wifi {settings['ssid']} attempt [{wifi_current_attempt}]")
             ip_address = connect_to_wifi(settings["ssid"], settings["password"])
             zip_code = settings["zip"]
             if is_connected_to_wifi():
                 print(f"Connected to wifi, IP address {ip_address}")
                 
                 display.fill(color565(0, 0, 0))
-                center_lgtext(f"v{__version__}",40)
-                center_lgtext("Connect to:", 60)
-                center_lgtext(f"{settings['ssid']}", 100)
-                center_lgtext(f"{ip_address}", 140)
+                center_lgtext("Peony & Lemon",60, color565(255, 244, 79))
+                center_lgtext("Mini Weather",80, color565(255, 244, 79))
+                center_smtext(f"v{__version__}",100)
+                center_smtext("Connecting to:", 120, color565(173, 216, 230))
+                center_smtext(f"SSID: {settings['ssid']}", 140, color565(173, 216, 230))
+                center_smtext(f"This IP: {ip_address}", 160, color565(173, 216, 230))
+                center_smtext(f"Zip Code: {settings['zip']}", 180)
 
-                time.sleep(2)
+                time.sleep(1)
                 break
             else:
                 wifi_current_attempt += 1
@@ -694,26 +1050,31 @@ try:
         else:
             # Bad configuration, delete the credentials file, reboot
             # into setup mode to get new credentials from the user.
-            print("Bad wifi connection!")
+            status = wlan.status()
+            if status == -1:
+                msg = "Connection failed (timeout or general error)."
+            elif status == -2:
+                msg = "Authentication failed (check password)."
+            elif status == -3:
+                msg = "No access point found (check SSID or 2.4GHz only)."
+            else:
+                msg = f"Unknown error (status code: {status})"
+            
+            print(f"❌ {msg}")
+            logging.error("Wi-Fi connect failed: %s (status code: %d)", msg, status)
+            
             os.remove(SETTINGS_FILE)
             machine_reset()
 
 except Exception as e:
     # Either no wifi configuration file found, or something went wrong, 
     # so go into setup mode.
+    #Capture traceback into a string and log it
     
-    # Send exception info to console
-    print("Exception occurred:", e)
-    
-    logging.error("Exception occurred: {}".format(e))
-
-    # Capture traceback into a string and log it
     buf = uio.StringIO()
     sys.print_exception(e, buf)
     logging.exception(buf.getvalue())
     
     setup_mode()
     server.run()
-
-#Start the web server...
-#server.run()    
+    
