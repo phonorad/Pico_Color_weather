@@ -25,7 +25,7 @@ import vga1_16x16 as font_lg
 import vga1_16x32 as font_huge
 
 # === Software Version ===
-__version__ = "1.1.0"
+__version__ = "1.0.0"
 # ========================
 
 # === Definitons for Wifi Setup and Access ===
@@ -181,15 +181,6 @@ def start_update_mode():
         # Serve your software update HTML page here
         return render_template(f"{AP_TEMPLATE_PATH}/index_swup_git.html")
 
-#    def swup_handler(request):
-#        html = "".join(render_template(f"{AP_TEMPLATE_PATH}/index_swup_git.html"))
-#        return Response(html, headers={"Content-Type": "text/html"})
-
-#    def swup_handler(request):
-#        print("swup_handler called")
-#        html = "<html><body><h1>Test page</h1></body></html>"
-#        return Response(html, headers={"Content-Type": "text/html"})
-
     def favicon_handler(request):
         return Response("", status=204)  # No Content
 
@@ -264,15 +255,6 @@ def setup_sw_handler(pin):
             press_time = None
 # Set up input as irq triggered, falling edge            
 setup_sw.irq(trigger=machine.Pin.IRQ_FALLING | machine.Pin.IRQ_RISING, handler=setup_sw_handler)
-    
-# === Set correct time from NTP server ===
-#def sync_time():
-#    try:
-#        print("Syncing time with NTP server...")
-#        ntptime.settime()  # This sets the RTC from the network time
-#        print("Time synced successfully!")
-#    except Exception as e:
-#        print(f"Failed to sync time: {e}")
 
 def sync_time(max_retries=3, delay=3):
     for attempt in range(1, max_retries + 1):
@@ -292,18 +274,6 @@ def is_daytime():
     t = localtime_with_offset()
     hour = t[3]  # Hour is the 4th element in the tuple
     return 7 <= hour < 19  # Define day as between 7am and 7pm (0700 to 1900)
-        
-# === Calculate correct local time ===
-#def localtime_with_offset():
-#    t = time.mktime(time.localtime())  # seconds since epoch UTC
-#    t += UTC_OFFSET                    # add offset seconds
-#    return time.localtime(t)
-
-#def localtime_with_offset():
-#    t = time.mktime(time.gmtime())  # UTC epoch seconds
-#    offset_seconds = int(gmt_offset * 3600)
-#    t += offset_seconds
-#    return time.localtime(t)
 
 def localtime_with_offset():
     """
