@@ -180,7 +180,16 @@ def start_update_mode():
     def swup_handler(request):
         # Serve your software update HTML page here
         return render_template(f"{AP_TEMPLATE_PATH}/index_swup_git.html")
-    
+
+#    def swup_handler(request):
+#        html = "".join(render_template(f"{AP_TEMPLATE_PATH}/index_swup_git.html"))
+#        return Response(html, headers={"Content-Type": "text/html"})
+
+#    def swup_handler(request):
+#        print("swup_handler called")
+#        html = "<html><body><h1>Test page</h1></body></html>"
+#        return Response(html, headers={"Content-Type": "text/html"})
+
     def favicon_handler(request):
         return Response("", status=204)  # No Content
 
@@ -199,31 +208,25 @@ def start_update_mode():
         return Response("Restarting device...", status=200, headers={"Content-Type": "text/plain"})
 
     async def upload_handler(request):
-        print("📥 Upload handler triggered")
+        filename = request.query.get("filename")
+        if not filename:
+            return Response("Missing filename", status=400)
+
         try:
-            filename = request.query.get("filename")
-            if not filename:
-                return Response("Missing filename", status=400)
-
-            content = request.data
-
-            # Normalize to bytes
-            if isinstance(content, str):
-                content = content.encode("utf-8")
-            elif not isinstance(content, bytes):
-                print(f"❌ Unexpected data type: {type(content)}")
-                return Response("Unexpected body data type", status=400)
-
-            print(f"✅ Received {len(content)} bytes for {filename}")
+            total_written = 0
+            chunk_size = 1024
 
             with open(filename, "wb") as f:
-                f.write(content)
+                while True:
+                    chunk = await request.read_body_chunk(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    total_written += len(chunk)
 
-            print(f"💾 Uploaded file saved: {filename}")
-            return Response(f"Saved to {filename}", status=200)
+            return Response(f"Saved {total_written} bytes to {filename}", status=200)
 
         except Exception as e:
-            print(f"❌ Upload error: {e}")
             return Response(f"Error: {e}", status=500)
         
     def catch_all_handler(request):
