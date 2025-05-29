@@ -170,7 +170,7 @@ def start_update_mode():
     display.fill(color565(0, 0, 0))
     center_lgtext("SW Update Mode",80)
     center_lgtext("Enter", 100)
-    center_smtext("http://{ip_address}/swup", 100)
+    center_smtext(f"http://{ip}/swup", 100)
     center_lgtext("into broswer", 140)
 
     def ap_version(request):
