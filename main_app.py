@@ -45,6 +45,11 @@ press_time = None
 long_press_triggered = False
 start_update_requested = False
 continue_requested = False
+init_complete = False      # Indicate whether all initi is completed (lat lon, gmt offset, weather)
+gmt_offset_complete = False
+lat_lon_complete = False
+weath_setup_complete = False
+
 UPLOAD_TEMP_SUFFIX = ".tmp"
 
 # === Define Months ===
@@ -52,7 +57,8 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 # === Define timezone ===
-UTC_OFFSET = -4 * 3600  # For EDT (UTC-4), or -5*3600 for EST (UTC-5)
+gmt_offset = 0   # Initialze gmt offset
+#gmt_offset = -4 * 3600  # For EDT (UTC-4), or -5*3600 for EST (UTC-5)
 
 # === SPI and Display Init ===
 WIDTH = 240
@@ -74,6 +80,41 @@ onboard_led = machine.Pin("LED", machine.Pin.OUT)
 setup_sw = machine.Pin(5, machine.Pin.IN, machine.Pin.PULL_UP)
 
 # === AP and Wi-Fi Setup ===
+
+SETTINGS_FILE = "settings.json"  # Or "/config/settings.json" if in subdirectory
+
+def load_settings():
+    # Case 1: File missing
+    if SETTINGS_FILE not in os.listdir():
+        print("Settings file is missing.")
+        return "missing", None
+
+    try:
+        # Try to parse JSON
+        with open(SETTINGS_FILE, "r") as f:
+            settings = json.load(f)
+
+        # Validate required keys
+        required_keys = ["ssid", "password", "zip"]
+        for key in required_keys:
+            if key not in settings or not settings[key]:
+                print(f"Invalid settings: Missing or empty '{key}'")
+                return "invalid", None
+
+        return "valid", settings
+
+    except Exception as e:
+        # Case 2: File exists but is corrupted or malformed
+        import uio
+        import sys
+        import logging
+
+        buf = uio.StringIO()
+        sys.print_exception(e, buf)
+        logging.exception("Settings file error:\n" + buf.getvalue())
+
+        return "corrupt", None
+    
 def machine_reset():
     time.sleep(2)
     print("Resetting...")
@@ -82,10 +123,13 @@ def machine_reset():
 def setup_mode():
     print("Entering setup mode...")
     display.fill(color565(0, 0, 0))
-    center_lgtext("Setup Mode",40)
-    center_lgtext("Open browser", 60)
-    center_lgtext("SELECT WiFi", 100)
-    center_lgtext("Pico Weather", 140)
+    center_lgtext("Setup Mode",40, color565(255, 255, 0))
+    center_lgtext("On Phone or", 60)
+    center_lgtext("Computer Go To", 80)
+    center_lgtext("WiFi Settings", 100)
+    center_lgtext("and Select", 120)
+    center_lgtext("Network:", 140)
+    center_lgtext("Pico Weather", 160, color565(0, 128, 128))
 
     def ap_index(request):
         if request.headers.get("host").lower() != AP_DOMAIN.lower():
@@ -124,10 +168,9 @@ def start_update_mode():
     print(f"start_update_mode: got IP = {ip}")
     
     display.fill(color565(0, 0, 0))
-    center_lgtext("SW Update Mode",40)
-    center_lgtext("Enter", 60)
-    center_lgtext("http://", 100)
-    center_lgtext("/swup", 140)
+    center_lgtext("SW Update Mode",80)
+    center_lgtext("Enter", 100)
+    center_smtext("http://{ip_address}/swup", 100)
     center_lgtext("into broswer", 140)
 
     def ap_version(request):
@@ -280,7 +323,11 @@ def localtime_with_offset():
             return mday - weekday < 1  # before 1st Sunday
         return False
 
-    offset = gmt_offset
+    if gmt_offset:          # Make sure gmt_offset is not None
+        offset = gmt_offset
+    else:
+        offset = 0
+        
     if is_us_dst(month, mday, weekday):
         offset += 1  # apply DST
 
@@ -476,10 +523,26 @@ def get_lat_lon(zip_code, country_code="us"):
             lon = float(place["longitude"])
             return lat, lon
         else:
-            print("API response error:", response.status_code)
+            print("Lat/Lon API response error:", response.status_code)
     except Exception as e:
         print("Failed to get lat/lon:", e)
     return None, None
+
+def get_gmt_offset(lat, lon, username="phonorad"):
+    try:
+        url = f"http://api.geonames.org/timezoneJSON?lat={lat}&lng={lon}&username={username}"
+        response = urequests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            gmt_offset = data.get("gmtOffset")
+            print(data)
+            print(f"GMT Offset: {gmt_offset} hours")
+            return gmt_offset
+        else:
+            print(f"Timezone API response error: {response.status_code}")
+    except Exception as e:
+        print(f"Failed to get GMT offset: {e}")
+    return None
 
 def extract_first_json_string_value(raw_json, key):
     """
@@ -795,12 +858,12 @@ def get_weather_data(lat, lon):
 
 
 def simplify_forecast(forecast):
-    MODIFIERS = ["Slight Chance", "Chance", "Mostly", "Partly", "Likely", "Isolated"]
+    MODIFIERS = ["Slight Chance", "Chance", "Mostly", "Partly", "Likely", "Scattered", "Isolated"]
     CONDITIONS = [
-        "Tornado", "Hailstorm", "Hailstorms", "Blizzard",
+        "Tornado", "Hailstorm", "Hailstorms", "Blizzard", "Winter Storm", "Winter Weather"
         "Freezing Rain", "Freezing Drizzle", "Hail", "Sleet", "Ice", "Frost",
         "Flash Flood", "Flood", "Dust Storm", "Smoke", "Volcanic Ash",
-        "Hurricane", "Tropical storm", 
+        "Hurricane", "Tropical storm", "Thunderstorm",
         "Thunderstorms", "T-storms", "Tstorms",
         "Storm", "Showers", "Rain",
         "Fog", "Snow", "Clear", "Sunny",
@@ -809,7 +872,8 @@ def simplify_forecast(forecast):
     ]
     # First, make sure there is a valid forecast
     if not forecast or not isinstance(forecast, str):
-        return "N/A"
+        return "No Forecast"
+    
     # Define priority by order in CONDITIONS list (lower index = higher priority)
     # Find highest priority condition (lowest index in CONDITIONS)
 
@@ -847,18 +911,61 @@ def simplify_forecast(forecast):
     priority_found_conditions.sort()  # sorts by priority index, then position, then cond
     found_condition = priority_found_conditions[0][2] if priority_found_conditions else ""
 
-    # Special rules for modifiers + thunderstorms
-    if found_modifier.lower() in ["chance", "likely"] and found_condition.lower() in ["thunderstorms", "t-storms", "tstorms"]:
-        found_condition = "Tstorms"
-    if found_modifier.lower() == "isolated" and found_condition.lower() in ["showers", "thunderstorms", "t-storms", "tstorms"]:
-        found_modifier = "Isol"
-
+    # Special rules for modifiers + conditions to keep total under 14 characters
+    # First, if no modifier, just check for the over 14 character conditions and shorten
+    if not found_modifier:
+        if found_condition.lower() =="freezing drizzle":
+            found_condition = "Frzing Drizzle"
+ 
+    # If get here, there is modifier, to check modifiers and conditions
+    else:    
+        #First check modifiers and make 6 chars or less
+        if found_modifier.lower() == "isolated":
+            found_modifier = "Isol"
+        if found_modifier.lower() == "slight chance":
+            found_modifier = "Chance"
+        if found_modifier.lower() == "scattered":
+            found_modifier = "Scattr"
+        # Next check conditions and make 7 chars or less
+        if found_condition.lower() =="hailstorm":
+            found_condition = "Hailstrm"
+        if found_condition.lower() =="hailstorms":
+            found_condition = "Hailstrm"
+        if found_condition.lower() =="blizzard":
+            found_condition = "Blizzrd"
+        if found_condition.lower() =="winter storm":
+            found_condition = "Wint St"
+        if found_condition.lower() =="winter weather":
+            found_condition = "Wint Wth"
+        if found_condition.lower() =="freezing rain":
+            found_condition = "Fr Rain"
+        if found_condition.lower() =="freezing drizzle":
+            found_condition = "Fr Drzl"
+        if found_condition.lower() =="flash flood":
+            found_condition = "Fl Flood"
+        if found_condition.lower() =="dust storm":
+            found_condition = "Dust St"
+        if found_condition.lower() =="volcanic ash":
+            found_condition = "Volc Ash"
+        if found_condition.lower() =="hurricane":
+            found_condition = "Hurrcan"
+        if found_condition.lower() =="tropical storm":
+            found_condition = "Trop St"
+        if found_condition.lower() =="thunderstorm":
+            found_condition = "Tstorms"
+        if found_condition.lower() =="thunderstorms":
+            found_condition = "Tstorms"
+        if found_condition.lower() =="thunderstorms":
+            found_condition = "Tstorms"
+        if found_condition.lower() =="t-storms":
+            found_condition = "Tstorms"
+            
     phrase = f"{found_modifier} {found_condition}".strip()
 
     if not found_condition and not found_modifier:
         # Fallback: just use first 14 chars of forecast, capitalized
-        print("forecast:", forecast, "| type:", type(forecast))
-        print("phrase:", phrase, "| type:", type(phrase))
+        print("No Condition or Modifier found - Phrase:", phrase, "| type:", type(phrase))
+        print("Using truncated Forecast - Forecast:", forecast, "| type:", type(forecast))
         s = forecast[:14]
         return s[0].upper() + s[1:] if s else s
     
@@ -919,17 +1026,17 @@ def application_mode(zip_code):
     
     # Determine Latitude and Longitude
     lat, lon = get_lat_lon(zip_code)
+    lat_lon_complete = lat is not None and lon is not None
     print("Latitude:", lat)
     print("Longitude:", lon)
     
     # Get time zone UTC offset from lat and lon
-    username = "phonorad"  #GeoNames username
-    url = f"http://api.geonames.org/timezoneJSON?lat={lat}&lng={lon}&username={username}"
-    response = urequests.get(url)
-    data = response.json()
-    gmt_offset = data.get("gmtOffset")
-    print(data)
-    print(f"GMT Offset: {gmt_offset} hours")
+    gmt_offset = get_gmt_offset(lat, lon)
+    if gmt_offset is None:
+        gmt_offset = 0  # fallback to UTC
+        gmt_offset_complete = False
+    else:
+        gmt_offset_complete = True
 
     # Initial weather fetch
     new_data = get_weather_data(lat, lon)
@@ -963,17 +1070,31 @@ def application_mode(zip_code):
     
         # Refresh weather WEATH_INTERVAL (5 min/300 sec) 
         if current_time - last_weather_update >= WEATH_INTERVAL:
-            new_data = get_weather_data(lat, lon)
-            if new_data:
-                temp, humidity, forecast = new_data
-                print(f"Updated: Temp: {temp}F, Humidity: {humidity}%, Forecast: {forecast}")
-                display_weather(temp, humidity, forecast)
-            else:
-                temp, humidity, forecast = None, None, None
-                display.fill(color565(0, 0, 0))
-                center_lgtext("Weather data", 80)
-                center_lgtext("unavailable", 100)
-            last_weather_update = current_time
+            if not lat_lon_complete:
+                lat, lon = get_lat_lon(zip_code)
+                lat_lon_complete = lat is not None and lon is not None
+                if lat_lon_complete:
+                    print(f"Got lat/lon: {lat}, {lon}")
+                
+            # Retry gmt offset if gmt offset not yet obtained
+            if not gmt_offset_complete:
+                gmt_offset = get_gmt_offset(lat, lon)
+                gmt_offset_complete = gmt_offset is not None
+                if gmt_offset_complete:
+                    print(f"Got GMT offset: {gmt_offset}")
+                
+            if lat_lon_complete:     
+                new_data = get_weather_data(lat, lon)
+                if new_data:
+                    temp, humidity, forecast = new_data
+                    print(f"Updated: Temp: {temp}F, Humidity: {humidity}%, Forecast: {forecast}")
+                    display_weather(temp, humidity, forecast)
+                else:
+                    temp, humidity, forecast = None, None, None
+                    display.fill_rect(0, 60, 240, 180, color565(0, 0, 0)) # x, y, w, h
+                    center_lgtext("Weather Data", 80)
+                    center_lgtext("Unavailable", 100)
+                last_weather_update = current_time
 
         # Get localtime *once* per loop
         now = localtime_with_offset()
@@ -998,10 +1119,6 @@ def application_mode(zip_code):
 # ===                If Wifi connection OK, go to Weather program ===
 # Figure out which mode to start up in...
 try:
-#    onboard_led = machine.Pin("LED", machine.Pin.OUT)
-#    setup_wifi_sw = machine.Pin(5, machine.Pin.IN, machine.Pin.PULL_UP)
-    os.stat(SETTINGS_FILE)
-    # File was found, attempt to connect to wifi...
     # See if setup wifi switch is pressed
     if setup_sw.value() == False:
         t = 50  # Switch must be pressed for 5 seconds to reset wifi config
@@ -1012,69 +1129,116 @@ try:
             print("Setup switch ")
             os.remove(SETTINGS_FILE)
             machine_reset()
+            
+    # See if settings.txt is there and valid
+    status, settings = load_settings()
+    if status == "missing":
+        # Display no settings file message and go to initial setup
+        display.fill(color565(0, 0, 0))
+        center_smtext("No Settings File Found", 80)
+        center_smtext("Going to Initial Setup Screen", 120)
+        for count in range(5,0, -1):   # Count down from 5 to 1
+            display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))  # Clears 1 text line
+            center_smtext(f"in {count} seconds", 140)
+            time.sleep(1)
+        print("Settings file not found. Entering setup mode.")
+        setup_mode()
+        server.run()
+        
+    elif status in ("invalid", "corrupt"):
+        # Display no settings file message and go to initial setup
+        display.fill(color565(0, 0, 0))
+        center_smtext("Settings File Invalid", 80)
+        center_smtext("Going to Initial Setup Screen", 120)
+        for count in range(5,0, -1):   # Count down from 5 to 1
+            display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))  # Clears 1 text line
+            center_smtext(f"in {count} seconds", 140)
+            time.sleep(1)
+        print("Settings file invalid or corrupted. Entering Setup Mode")
+        # delete file and enter setup mode:
+        try:
+            os.remove(SETTINGS_FILE)
+        except:
+            pass
+        setup_mode()
+        server.run()
+
+    else:
+        print("Settings loaded successfully.")
+      
+    # Settings files loaded OK, start up  
     # Display P&L Logo
-    print("displaying logo")
+    print("Displaying logo")
     image_path = "/icons/pl_logo_240x240_rgb565.raw"
     display_raw_image_in_chunks(display, image_path, 0, 0, 240, 240)
     time.sleep(5)
     
-    with open(SETTINGS_FILE) as f:
-        wifi_current_attempt = 1
-        settings = json.load(f)
-        while (wifi_current_attempt <= WIFI_MAX_ATTEMPTS):
-            print(settings['ssid'])
-            print(settings['password'])
-            print(settings['zip'])
-            print(f"Connecting to wifi {settings['ssid']} attempt [{wifi_current_attempt}]")
-            ip_address = connect_to_wifi(settings["ssid"], settings["password"])
-            zip_code = settings["zip"]
-            if is_connected_to_wifi():
-                print(f"Connected to wifi, IP address {ip_address}")
-                
-                display.fill(color565(0, 0, 0))
-                center_lgtext("Peony & Lemon",60, color565(255, 244, 79))
-                center_lgtext("Mini Weather",80, color565(255, 244, 79))
-                center_smtext(f"v{__version__}",100)
-                center_smtext("Connecting to:", 120, color565(173, 216, 230))
-                center_smtext(f"SSID: {settings['ssid']}", 140, color565(173, 216, 230))
-                center_smtext(f"This IP: {ip_address}", 160, color565(173, 216, 230))
-                center_smtext(f"Zip Code: {settings['zip']}", 180)
-
-                time.sleep(1)
-                break
-            else:
-                wifi_current_attempt += 1
-                
+    # TRy to connect to Wifi
+    wifi_current_attempt = 1
+    while (wifi_current_attempt < WIFI_MAX_ATTEMPTS):
+        print(settings['ssid'])
+        print(settings['password'])
+        print(settings['zip'])
+        print(f"Connecting to wifi {settings['ssid']} attempt [{wifi_current_attempt}]")
+        
+        display.fill(color565(0, 0, 0))
+        center_smtext("Connecting to", 120, color565(173, 216, 230))
+        center_smtext("WiFi Network SSID:", 140, color565(173, 216, 230))
+        center_smtext(f"{settings['ssid']}", 160, color565(173, 216, 230))
+        ip_address = connect_to_wifi(settings["ssid"], settings["password"])
         if is_connected_to_wifi():
-            application_mode(zip_code)
+            print(f"Connected to wifi, IP address {ip_address}")
+                
+            display.fill(color565(0, 0, 0))
+            center_lgtext("Peony & Lemon",60, color565(255, 254, 140))
+            center_lgtext("Mini Weather",80, color565(255, 254, 140))
+            center_smtext(f"v{__version__}",100)
+            center_smtext("Connected:", 120, color565(173, 216, 230))
+            center_smtext(f"WiFi SSID: {settings['ssid']}", 140, color565(173, 216, 230))
+            center_smtext(f"This IP: {ip_address}", 160, color565(173, 216, 230))
+            center_smtext(f"Zip Code: {settings['zip']}", 180)
+
+            time.sleep(1)
+            break
+        
         else:
-            # Bad configuration, delete the credentials file, reboot
-            # into setup mode to get new credentials from the user.
-            status = wlan.status()
-            if status == -1:
-                msg = "Connection failed (timeout or general error)."
-            elif status == -2:
-                msg = "Authentication failed (check password)."
-            elif status == -3:
-                msg = "No access point found (check SSID or 2.4GHz only)."
-            else:
-                msg = f"Unknown error (status code: {status})"
+            wifi_current_attempt += 1
+                
+    if is_connected_to_wifi():
+        zip_code = settings["zip"]
+        application_mode(zip_code)
+    else:
+        # Bad configuration, delete the credentials file, reboot
+        # into setup mode to get new credentials from the user.
+        wlan = network.WLAN(network.STA_IF)
+        status = wlan.status()
+
+        msg = f"Error (Code: {status})"
             
-            print(f"❌ {msg}")
-            logging.error("Wi-Fi connect failed: %s (status code: %d)", msg, status)
-            
-            os.remove(SETTINGS_FILE)
-            machine_reset()
+        # Display Wifi connect failed message and error
+        display.fill(color565(0, 0, 0))
+        center_smtext("WiFi Connect Failed:", 80)
+        center_smtext(msg,100)
+        center_smtext("Going to Initial Setup Screen", 120)
+        for count in range(5,0, -1):   # Count down from 5 to 1
+            display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))  # Clears 1 text line
+            center_smtext(f"in {count} seconds", 140)
+            time.sleep(1)
+        #Print wifi connect error to console
+        print(f"❌ {msg}")
+        # Log wifi connect error to log file
+        logging.error(f"Wi-Fi connect failed: {msg} (status code: {status})")
+        time.sleep(5)
+        os.remove(SETTINGS_FILE)
+        machine_reset()
 
 except Exception as e:
-    # Either no wifi configuration file found, or something went wrong, 
-    # so go into setup mode.
-    #Capture traceback into a string and log it
-    
+    # Log the error
     buf = uio.StringIO()
     sys.print_exception(e, buf)
     logging.exception(buf.getvalue())
     
-    setup_mode()
-    server.run()
+    logging.info("Restarting device in 2 seconds...")
+    time.sleep(2)
+    machine.reset()
     
