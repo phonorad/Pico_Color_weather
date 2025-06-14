@@ -25,7 +25,7 @@ import vga1_16x16 as font_lg
 import vga1_16x32 as font_huge
 
 # === Software Version ===
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 # ========================
 
 # === Definitons for Wifi Setup and Access ===
@@ -210,7 +210,11 @@ def start_update_mode():
             with open(filename, "wb") as f:
                 while True:
                     chunk = await request.read_body_chunk(chunk_size)
-                    if not chunk:
+                    if chunk is None:
+                        await uasyncio.sleep(0.05)
+                        continue
+                    if chunk == b'':
+                        # EOF: end of upload
                         break
                     f.write(chunk)
                     total_written += len(chunk)
