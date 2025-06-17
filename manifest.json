@@ -1,6 +1,9 @@
 {
-  "version": "1.1.0",
-  "files": [
-    "main_app.py"
-  ]
+  "version": "1.0.1",
+  "files": {
+    "main_app.py": {
+      "sha256": "0210393352104f4aa9091dd69266fea29b027511cafc8975676262a07d697af7",
+      "url": "main_app.py"
+    }
+  }
 }
