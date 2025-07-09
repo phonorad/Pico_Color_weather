@@ -6,7 +6,6 @@ from machine import Pin, SPI
 import math
 import ntptime
 import gc
-import framebuf
 import uio
 import sys
 import uasyncio
@@ -19,7 +18,7 @@ import ujson as json
 import os
 import ure  # MicroPython’s regex module
 import _thread
-import socket # temporary for troubleshooting
+
 # Imports for round color tft display
 import gc9a01py as gc9a01
 import vga1_8x16 as font_sm
@@ -31,8 +30,8 @@ __version__ = "1.0.1"
 # ========================
 
 # === Definitons for Wifi Setup and Access ===
-AP_NAME = "pico weather"
-AP_DOMAIN = "picoweather.net"
+AP_NAME = "P&L Forecaster"
+AP_DOMAIN = "plforecaster.net"
 AP_TEMPLATE_PATH = "ap_templates"
 APP_TEMPLATE_PATH = "app_templates"
 SETTINGS_FILE = "settings.json"
@@ -40,23 +39,31 @@ WIFI_MAX_ATTEMPTS = 3
 
 # === Initialize/define parameters ===
 SYNC_INTERVAL = 3600 # Sync to NTP time server every hour
-WEATH_INTERVAL = 300 # Update weather every 5 mins
+WEATH_INTERVAL = 1800 # Update forecast every 30 mins
 last_sync = 0
 last_weather_update = 0
 press_time = None
 long_press_triggered = False
 start_update_requested = False
-continue_requested = False
-init_complete = False      # Indicate whether all initi is completed (lat lon, gmt offset, weather)
+# continue_requested = False
+init_complete = False      # Indicate whether all init is completed (lat lon, gmt offset, weather)
 gmt_offset_complete = False
 lat_lon_complete = False
 weath_setup_complete = False
 client_connected = False
+sunrise = None
+sunset = None
+last_sun_fetch_day = None
+last_displayed_time = ""
+last_displayed_date = ""
+last_sun_update_date = None  # track date of last sunrise/sunset fetch
+sunrise_sunset_data = None   # to store sunrise/sunset info
+retry_allowed = True  # flag whether to allow lat/lon lookup retry or not
 
 UPLOAD_TEMP_SUFFIX = ".tmp"
 
 # === Need this for NWS Weather API ====
-USER_AGENT = "PLWeatherDisplay (phonorad@gmail.com)"  # replace with your info
+USER_AGENT = "PLForecastDisplay (phonorad@gmail.com)"  # replace with your info
 
 # === Define Months ===
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -76,7 +83,6 @@ TIMEZONE_OFFSETS = {
 
 # === Define timezone ===
 gmt_offset = 0   # Initialze gmt offset
-#gmt_offset = -4 * 3600  # For EDT (UTC-4), or -5*3600 for EST (UTC-5)
 
 # === SPI and Display Init ===
 WIDTH = 240
@@ -106,65 +112,103 @@ def print_memory_usage():
     print(f"  Free:      {free} bytes")
     print(f"  Allocated: {allocated} bytes")
     print(f"  Total:     {total} bytes\n")
+    
+def test_free_memory(max_size=60000, step=1024):
+    gc.collect()  # force garbage collection
+    print("Testing max allocatable memory in bytes...")
+
+    size = step
+    last_good = 0
+
+    while size <= max_size:
+        try:
+            _ = bytearray(size)
+            last_good = size
+            size += step
+        except MemoryError:
+            break
+
+    print("Max allocatable buffer size:", last_good, "bytes")
+    return last_good
 
 # === AP and Wi-Fi Setup ===
 def load_settings():
-    # Case 1: File missing
+    # Check if file is missing
     if SETTINGS_FILE not in os.listdir():
         print("Settings file is missing.")
-        return "missing", None
+        return "missing", None, "No Settings Found"
 
     try:
         # Try to parse JSON
         with open(SETTINGS_FILE, "r") as f:
             settings = json.load(f)
 
-        # Validate required keys
-        required_keys = ["ssid", "password", "zip"]
-        for key in required_keys:
-            if key not in settings or not settings[key]:
-                print(f"Invalid settings: Missing or empty '{key}'")
-                return "invalid", None
-        # Check if Lat/Lon are present and valid
-        lat = settings.get("lat", None)
-        lon = settings.get("lon", None)
-        if lat is not None and lon is not None:
-            print(f"Settings loaded with lat.lon: {lat}, {lon}")
+        # Validate WiFi SSID (Required Parameter)
+        ssid = settings.get("ssid", "").strip()
+        if not ssid:
+            print("SSID missing from settings")
+            return "invalid", None, "WiFi SSID missing"
+        
+        # Password can be empty (open networks allowed)
+        password = settings.get("password", "")
+        if password == "":
+            print("Note: Wi-Fi password not set (open network)")
+        
+                # Validate ZIP or lat/lon - require at least one valid set
+        zip_code = settings.get("zip", "").strip()
+        lat_raw = settings.get("lat")
+        lon_raw = settings.get("lon")
+
+        lat = None
+        lon = None
+        latlon_valid = False
+
+        # Validate lat/lon if both are present and not empty strings
+        if lat_raw not in [None, ""] and lon_raw not in [None, ""]:
+            try:
+                lat = float(lat_raw)
+                lon = float(lon_raw)
+                latlon_valid = True
+                print(f"Settings loaded with lat/lon: {lat}, {lon}")
+            except ValueError:
+                print("Invalid settings: lat/lon must be numbers")
+
+        if zip_code:
+            print(f"Settings loaded with ZIP code: {zip_code}")
+        elif latlon_valid:
+            pass  # Already logged above
         else:
-            print("Lat/lon not present in settings. Will resolve from zip code")
+            print("Invalid settings: Must provide ZIP code or valid lat/lon")
+            return "invalid", None, "Bad ZIP or lat/lon"
         
         # Validate timezone info
         tz = settings.get("timezone")
         if not tz:
             print("Invalid settings: Missing timezone")
-            return "invalid", None
+            return "invalid", None, "Timezone missing"
 
         if tz == "manual":
             try:
                 mo = settings.get("manual_offset", "")
                 if mo == "":
                     print("Invalid settings: manual_offset not provided")
-                    return "invalid", None
+                    return "invalid", None, "Need Timezone offset"
                 float(mo)  # Just check it's a valid float
             except ValueError:
-                print("Invalid settings: manual_offset must be a number")
-                return "invalid", None
+                print("Invalid settings: Timezone offset not a number")
+                return "invalid", None, "Timezone offset not a number"
 
         print(f"Timezone loaded: {tz}, DST enabled: {settings.get('use_dst')}, manual_offset: {settings.get('manual_offset')}")
 
-        return "valid", settings
+        return "valid", settings, "Settings valid"
 
     except Exception as e:
-        # Case 2: File exists but is corrupted or malformed
-#         import uio
-#         import sys
-#         import logging
 
         buf = uio.StringIO()
         sys.print_exception(e, buf)
         logging.exception("Settings file error:\n" + buf.getvalue())
 
-        return "corrupt", None
+        return "corrupt", None, "Settings file corrupt"
 
 def save_settings(settings):
     """
@@ -179,7 +223,17 @@ def save_settings(settings):
     except Exception as e:
         print("Failed to save settings:", e)
         return False
-    
+
+def serve_config_page(setup_mode: bool):
+    def response_gen():
+        with open(f"{AP_TEMPLATE_PATH}/config_settings.html", "r") as f:
+            for line in f:
+                yield line.replace(
+                    "window.setupMode = false;",
+                    f"window.setupMode = {str(setup_mode).lower()};"
+                )
+    return Response(response_gen(), status=200, headers={"Content-Type": "text/html"})
+
 def machine_reset():
     time.sleep(2)
     print("Rebooting...")
@@ -192,7 +246,23 @@ def setup_mode():
     center_smtext("On Phone or Computer", 80)
     center_smtext("Open WiFi/Network settings", 100)
     center_smtext("and select network:", 120)
-    center_lgtext("pico weather", 140, color565(255, 255, 0))
+    center_lgtext("P&L Forecaster", 140, color565(255, 255, 0))
+    
+    def load_settings():
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            # Defaults if file missing or corrupt
+            return {
+                "location_source": "zip",
+                "zip": "",
+                "lat": "",
+                "lon": "",
+                "timezone": "",
+                "use_dst": False,
+                "manual_offset": ""
+            }
 
     def ap_index(request):
         global client_connected
@@ -211,32 +281,90 @@ def setup_mode():
         if request.headers.get("host").lower() != AP_DOMAIN.lower():
             return render_template(f"{AP_TEMPLATE_PATH}/redirect.html", domain = AP_DOMAIN.lower())
         
-        # Serve the main config page
-        return render_template(f"{AP_TEMPLATE_PATH}/index_wifi_zip.html")
+        # setup_mode=True means show WiFi fields, hide software update
+        return serve_config_page(setup_mode=True)
 
-    def ap_configure(request):
-        print("Saving wifi and zip code settings...")
+#    def ap_configure(request):
+#        print("Saving wifi, location and timezone settings...")
 
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(request.form, f)
+#        with open(SETTINGS_FILE, "w") as f:
+#            json.dump(request.form, f)
             
-        display.fill(color565(0, 0, 0))
-        center_lgtext("Settings", 60, color565(0, 255, 0))
-        center_lgtext("Saved!", 80, color565(0, 255, 0))
-        center_smtext("Restarting...", 120)
+#        display.fill(color565(0, 0, 0))
+#        center_lgtext("Settings", 60, color565(0, 255, 0))
+#        center_lgtext("Saved!", 80, color565(0, 255, 0))
+#        center_smtext("Restarting...", 120)
             
-        # Show "Configured" page to user
-        response = render_template(f"{AP_TEMPLATE_PATH}/configured.html", ssid = request.form["ssid"])
-    
-        # Schedule reset shortly after responding
-        def delayed_reset(timer):
-            print("Rebooting now...")
-            machine.reset()
-    
-        # Timer fires after 2 seconds
-        machine.Timer(-1).init(period=2000, mode=machine.Timer.ONE_SHOT, callback=delayed_reset)
 
-        return response
+#        # Define a generator response so we can delay and reset after sending the page
+#        def response_gen():
+#            # Yield HTML content to the browser using a generator
+#            yield from render_template(f"{AP_TEMPLATE_PATH}/configured.html")
+    
+#            # Flush and pause to the display updates
+#            time.sleep(2)
+    
+#            # Reboot the device (this line will only run after page is fully sent)
+#            print("Settings save, rebooting now...")
+#            machine.reset()
+
+#        # Return the generator to the server — Phew will stream the response
+#        return response_gen()
+    
+    def load_settings():
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {
+                "location_source": "zip",
+                "zip": "",
+                "lat": "",
+                "lon": "",
+                "timezone": "",
+                "use_dst": False,
+                "manual_offset": ""
+            }
+
+    def settings_get_handler(request):
+        print("GET /settings received (setup mode)")
+        settings = load_settings()
+        return Response(json.dumps(settings), status=200, headers={"Content-Type": "application/json"})
+
+    def settings_post_handler(request):
+        try:
+            form = request.form
+            current_settings = load_settings()
+            current_settings.update({
+                "location_source": form.get("location_source", "zip"),
+                "zip": form.get("zip", "").strip(),
+                "lat": form.get("lat", "").strip(),
+                "lon": form.get("lon", "").strip(),
+                "timezone": form.get("timezone", ""),
+                "use_dst": form.get("use_dst") in ("true", "on", "1"),
+                "manual_offset": form.get("manual_offset", ""),
+                "ssid": form.get("ssid", "").strip(),
+                "password": form.get("password", "").strip()
+            })
+
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(current_settings, f)
+
+            # Feedback on OLED
+            display.fill(color565(0, 0, 0))
+            center_lgtext("Settings", 60, color565(0, 255, 0))
+            center_lgtext("Saved!", 80, color565(0, 255, 0))
+            center_smtext("Restarting...", 120)
+
+            def response_gen():
+                yield from render_template(f"{AP_TEMPLATE_PATH}/configured.html")
+                time.sleep(2)
+                machine.reset()
+
+            return response_gen()
+
+        except Exception as e:
+            return Response(f"Failed to save settings: {e}", status=500)
     
     def ap_catch_all(request):
         if request.headers.get("host") != AP_DOMAIN:
@@ -245,7 +373,9 @@ def setup_mode():
         return "Not found.", 404
 
     server.add_route("/", handler = ap_index, methods = ["GET"])
-    server.add_route("/configure", handler = ap_configure, methods = ["POST"])
+#    server.add_route("/configure", handler = ap_configure, methods = ["POST"])
+    server.add_route("/settings", handler=settings_get_handler, methods=["GET"])
+    server.add_route("/settings", handler=settings_post_handler, methods=["POST"])
     server.set_callback(ap_catch_all)
 
     ap = access_point(AP_NAME)
@@ -264,8 +394,8 @@ def start_update_mode():
     center_lgtext("Software",60,color565(0, 255, 0))
     center_lgtext("Update Mode",80,color565(0, 255, 0))
     center_smtext("Enter", 100)
-    center_smtext(f"http://{ip}/swup", 120,color565(255, 255, 0))
-    center_smtext("into broswer", 140)
+    center_smtext(f"http://{ip}", 120,color565(255, 255, 0))
+    center_smtext("into browser", 140)
 
     def ap_version(request):
         # Return the version defined in main.py
@@ -273,7 +403,7 @@ def start_update_mode():
 
     def swup_handler(request):
         # Serve your software update HTML page here
-        return render_template(f"{AP_TEMPLATE_PATH}/index_swup_git.html")
+        return serve_config_page(setup_mode=False)
 
     def favicon_handler(request):
         return Response("", status=204)  # No Content
@@ -335,25 +465,29 @@ def start_update_mode():
         return Response("Update verified and applied", status=200)
 
     def continue_handler(request):
-        global continue_requested
-        continue_requested = True
-        print("Continue requested, restarting device...")
+#        global continue_requested
+#        continue_requested = True
+        print("Software updated, OK clicked, restarting device...")
 
         # Display restarting received message    
         display.fill(color565(0, 0, 0))
         center_lgtext("New Version", 60, color565(0, 255, 0))
         center_lgtext("Saved!", 80, color565(0, 255, 0))
-        center_smtext("Restarting...", 120)
+        center_smtext("Restarting device...", 120)
     
-        # Schedule reset shortly after responding
-        def delayed_reset(timer):
-            print("Rebooting now...")
-            machine.reset()
-    
-        # Timer fires after 2 seconds
-        machine.Timer(-1).init(period=2000, mode=machine.Timer.ONE_SHOT, callback=delayed_reset)
+        return render_template(f"{AP_TEMPLATE_PATH}/update_complete.html")
+#        def response_gen():
+#            yield "OK"
+#            yield from render_template(f"{AP_TEMPLATE_PATH}/update_complete.html")
+#            time.sleep(2)
+#            print("Software update complete. Rebooting now...")
+#            machine.reset()
 
-        return Response("Restarting device...", status=200, headers={"Content-Type": "text/plain"})
+#         return response_gen()
+    
+    def update_complete_handler(request):
+        print("Serving update_complete.html")
+        return render_template(f"{AP_TEMPLATE_PATH}/update_complete.html")
     
     async def upload_handler(request):
         filename = request.query.get("filename")
@@ -388,25 +522,103 @@ def start_update_mode():
         except Exception as e:
             return Response(f"Error: {e}", status=500)
         
+    def load_settings():
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            # Defaults if file missing or corrupt
+            return {
+            "location_source": "zip",
+            "zip": "",
+            "lat": "",
+            "lon": "",
+            "timezone": "",
+            "use_dst": False,
+            "manual_offset": ""
+        }
+
+    def json_response(data, status=200):
+        body = json.dumps(data)
+        return Response(
+            body,
+            status=status,
+            headers={"Content-Type": "application/json"}
+        )
+
+    def settings_get_handler(request):
+        print("GET /settings received")
+        settings = load_settings()
+        print("Sending settings to browser:", settings)
+        return Response(json.dumps(settings), status=200, headers={"Content-Type": "application/json"})
+
+    def settings_post_handler(request):
+        try:
+            form = request.form
+            
+            # Load existing settings first
+            current_settings = load_settings()
+            
+            # Only update the fields from the form
+            current_settings.update({
+                "location_source": form.get("location_source", "zip"),
+                "zip": form.get("zip", "").strip(),
+                "lat": form.get("lat", "").strip(),
+                "lon": form.get("lon", "").strip(),
+                "timezone": form.get("timezone", ""),
+                "use_dst": form.get("use_dst") in ("true", "on", "1"),
+                "manual_offset": form.get("manual_offset", ""),
+            })
+            
+            # Save merged settings
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(current_settings, f)
+                
+            # Show success and reboot
+            display.fill(color565(0, 0, 0))
+            center_lgtext("Settings", 60, color565(0, 255, 0))
+            center_lgtext("Saved!", 80, color565(0, 255, 0))
+            center_smtext("Restarting...", 120)
+            
+            def response_gen():
+                yield from render_template(f"{AP_TEMPLATE_PATH}/configured.html")
+                time.sleep(2)
+                print("Settings updated, rebooting now...")
+                machine.reset()
+
+            return response_gen()
+            
+        except Exception as e:
+            return Response(f"Failed to save settings: {e}", status=500)
+        
+    def reboot_handler(request):
+        print("Rebooting now...")
+        machine.reset()
+        return Response("Rebooting...", status=200)
+        
     def catch_all_handler(request):
         print(f"Fallback route hit: {request.method} {request.path}")
         return Response("Route not found", status=404)
         
-    server.add_route("/swup", handler=swup_handler, methods=["GET"])
+    server.add_route("/", handler=swup_handler, methods=["GET"])
+    server.add_route("/settings", handler=settings_get_handler, methods=["GET"])
+    server.add_route("/settings", handler=settings_post_handler, methods=["POST"])
     server.add_route("/version", handler=ap_version, methods=["GET"])
     server.add_route("/favicon.ico", handler=favicon_handler, methods=["GET"])
     server.add_route("/continue", handler=continue_handler, methods=["POST"])
     server.add_route("/upload", handler=upload_handler, methods=["POST"])
     server.add_route("/checksums", handler=checksums_handler, methods=["POST"])
     server.add_route("/finalize", handler=finalize_handler, methods=["POST"])
+    server.add_route("/update_complete.html", handler=update_complete_handler, methods=["GET"])
+    server.add_route("/reboot", reboot_handler, methods=["POST"])
         
     # Start the server (if not already running)
-    print(f"Waiting for user at http://{ip}/swup ...")
+    print(f"Waiting for user at http://{ip} ...")
     server.run()
 
     # Wait until user clicks OK
-    while not continue_requested:
-        time.sleep(0.1)
+#    while not continue_requested:
+#        time.sleep(0.1)
 
 # === Handler for button presses during operation ===
 def setup_sw_handler(pin):
@@ -440,7 +652,7 @@ def sync_time(max_retries=3, delay=3):
     print("Time sync failed after retries.")
     return False
         
-def is_daytime():
+def is_daytime_now():
 #    t = time.localtime()
     t = localtime_with_offset()
     hour = t[3]  # Hour is the 4th element in the tuple
@@ -466,7 +678,7 @@ def apply_gmt_offset_from_settings(settings):
     global gmt_offset, gmt_offset_complete
 
     tz = settings.get("timezone")
-    use_dst = settings.get("use_dst") == "on"
+    use_dst = settings.get("use_dst", False)
     manual_offset_raw = settings.get("manual_offset", "")
 
     if tz == "Manual":
@@ -503,15 +715,86 @@ def localtime_with_offset():
     local_timestamp = now + int(offset * 3600)
     return time.localtime(local_timestamp)
 
+def format_12h_time(t):
+    hour = t[3]
+    am_pm = "AM"
+    if hour == 0:
+        hour_12 = 12
+    elif hour > 12:
+        hour_12 = hour - 12
+        am_pm = "PM"
+    elif hour == 12:
+        hour_12 = 12
+        am_pm = "PM"
+    else:
+        hour_12 = hour
+
+    return "{:2d}:{:02d} {}".format(hour_12, t[4], am_pm)
+
 def update_time_only(time_str):
     display.fill_rect(0, 40, 240, 20, color565(0, 0, 0))  # Clear just time area
     center_lgtext(time_str, 40, color565(0, 255, 255))
     
 def update_date_only(date_str):
     display.fill_rect(0, 20, 240, 20, color565(0, 0, 0))  # Clear just date area
-    center_lgtext(date_str, 20, color565(255, 255, 255))    
+    center_lgtext(date_str, 20, color565(255, 255, 255))
+    
+def fetch_sunrise_sunset(lat, lon, gmt_offset_hours):
+    url = f"https://api.sunrise-sunset.org/json?lat={lat}&lng={lon}&formatted=0"
+    try:
+        r = urequests.get(url)
+        data = r.json()
+        r.close()
+        if data["status"] != "OK":
+            print("Sunrise-Sunset API error:", data["status"])
+            return None, None
+        sunrise_utc = data["results"]["sunrise"]  # ISO 8601 UTC string
+        sunset_utc = data["results"]["sunset"]
 
+        # Convert ISO 8601 to epoch seconds (MicroPython may not have dateutil)
+        sunrise_epoch = iso8601_to_epoch(sunrise_utc)
+        sunset_epoch = iso8601_to_epoch(sunset_utc)
+
+        # Apply offset for local time (including DST)
+        offset_sec = int(gmt_offset_hours * 3600)
+        sunrise_local = time.localtime(sunrise_epoch + offset_sec)
+        sunset_local = time.localtime(sunset_epoch + offset_sec)
+
+        return sunrise_local, sunset_local
+
+    except Exception as e:
+        print("Error fetching sunrise/sunset:", e)
+        return None, None
+
+def iso8601_to_epoch(iso_str):
+    # Example iso_str: "2025-06-21T09:32:00+00:00"
+    # Parse manually (MicroPython usually lacks full datetime parsing)
+    # This is a minimal parser:
+    try:
+        date_part, time_part = iso_str.split("T")
+        year, month, day = map(int, date_part.split("-"))
+        time_str = time_part.split("+")[0].split("Z")[0]
+        hour, minute, second = map(int, time_str.split(":"))
+        # Convert to epoch seconds (approximate using time.mktime and assuming no timezone)
+        return time.mktime((year, month, day, hour, minute, second, 0, 0))
+    except:
+        return 0
+    
+def format_sun_time(t):
+    # t is a time.struct_time or tuple like (year, month, day, hour, minute, second, ...)
+    hour = t[3]
+    minute = t[4]
+    am_pm = "AM" if hour < 12 else "PM"
+    hour_12 = hour % 12
+    if hour_12 == 0:
+        hour_12 = 12
+    return f"{hour_12}:{minute:02d} {am_pm}"
+
+# === Forecast Icon selection ====
 def get_icon_filename(simplified_now, day):
+    
+    if not simplified_now:
+        simplified_now = "No Forecast"
     f = simplified_now.lower()
     print(f"simplified forecast: {f}")
 
@@ -542,7 +825,7 @@ def get_icon_filename(simplified_now, day):
         icon_filename = "icons/windy_rgb565.raw"
     # If nothing matches, show clear icon (NOTE: CHANGE TO SOMETHING ELSE, smiley, world, etc)
     else:
-        icon_filename = "icons/clear_day_rgb565.raw" if day else "icons/clear_night_rgb565.raw"
+        icon_filename = "icons/smiley_rgb565.raw" if day else "icons/smiley_sleep_rgb565.raw"
     
     print(f"Icon filename selected: {icon_filename}")
     return icon_filename
@@ -586,22 +869,6 @@ def display_raw_image_in_chunks(display, filepath, x, y, width, height, scale=1,
         clear:       If True, clear the screen before drawing.
     """
     import gc
-
-#    def blend565(a, b):
-        # Blend two RGB565 pixels (average)
-#        r1 = (a >> 11) & 0x1F
-#        g1 = (a >> 5) & 0x3F
-#        b1 = a & 0x1F
-
-#        r2 = (b >> 11) & 0x1F
-#        g2 = (b >> 5) & 0x3F
-#        b2 = b & 0x1F
-
-#        r = (r1 + r2) >> 1
-#        g = (g1 + g2) >> 1
-#        b = (b1 + b2) >> 1
-
-#        return (r << 11) | (g << 5) | b
 
     def smooth_chunk(data, width, height, threshold=10):
         out = bytearray(len(data))
@@ -728,10 +995,12 @@ def draw_sparse_1bit(display, filepath, color=0x0000):
             x, y = bytes_read
             display.pixel(x, y, color)
 
-def draw_weather_icon(gc9a01, simplified_now, x, y):
+def draw_weather_icon(gc9a01, simplified_now, x, y, is_daytime=None):
 #    gc9a01.fill_rect(x, y, 48, 32, 0)
-    day = is_daytime()
-
+    if is_daytime is None:
+        day = is_daytime_now()  # use calculated day/night indication
+    else:
+        day = is_daytime  # use forecast day/night indication
     icon_filename = get_icon_filename(simplified_now, day)
     if icon_filename:
         try:
@@ -786,29 +1055,35 @@ def get_lat_lon(zip_code, country_code="us"):
             place = data["places"][0]
             lat = float(place["latitude"])
             lon = float(place["longitude"])
-            return lat, lon
+            return lat, lon, "Lat/Lon Lookup OK"
+        elif response.status_code == 404:
+            print(f"Invalid Zip Code: {zip_code}")
+            return None, None, "Invalid Zip Code"
         else:
-            print("Lat/Lon API response error:", response.status_code)
+            print(f"Unexpected API status code: {response.status_code}")
+            return None, None, "Lat/Lon Lookup Site Error"
     except Exception as e:
-        print("Failed to get lat/lon:", e)
-    return None, None
+        print("WiFi or API error during Zip to lat/lon lookup:", repr(e))
+    return None, None, "WiFi or Site Error"
 
-#def get_gmt_offset(lat, lon, username="phonorad"):
-#    try:
-#        url = f"http://api.geonames.org/timezoneJSON?lat={lat}&lng={lon}&username={username}"
-#        response = urequests.get(url)
-#        if response.status_code == 200:
-#            data = response.json()
-#            gmt_offset = data.get("gmtOffset")
-#            print(data)
-#            print(f"GMT Offset: {gmt_offset} hours")
-#            return gmt_offset
-#        else:
-#            print(f"Timezone API response error: {response.status_code}")
-#    except Exception as e:
-#        print(f"Failed to get GMT offset: {e}")
-#    return None
 
+# === Get Sunrise and sunset times if needed ====
+def update_sun_times_if_needed(lat, lon, gmt_offset, dst):
+    global sunrise, sunset, last_sun_fetch_day
+    now = time.localtime()
+    today = (now[0], now[1], now[2])  # year, month, day
+
+    if last_sun_fetch_day != today:
+        print("Fetching new sunrise/sunset times...")
+        sr, ss = fetch_sunrise_sunset(lat, lon, gmt_offset, dst)
+        if sr and ss:
+            sunrise = sr
+            sunset = ss
+            last_sun_fetch_day = today
+            print(f"Sunrise: {format_sun_time(sr)}, Sunset: {format_sun_time(ss)}")
+        else:
+            print("Failed to fetch sunrise/sunset times")
+            
 # === Helpers for extracting strings and data from json and streams ====
 
 def extract_first_json_string_value(raw_json, key):
@@ -843,23 +1118,22 @@ def extract_first_json_string_value_stream(response_stream, key):
     Stream‐parse response_stream for the first JSON string field "key":"value"
     without loading the full response into RAM.
     """
-    key_bytes = b'"' + key.encode("utf-8") + b'":"'
     buf = b""
-    max_buf = 1024
+    max_buf = 4096
+    # Compile regex pattern like: b'"shortForecast"\s*:\s*"([^"]+)"'
+    pattern = b'"' + key.encode("utf-8") + b'"\\s*:\\s*"([^"]+)"'
+    regex = ure.compile(pattern)
 
     while True:
-        chunk = response_stream.read(128)
+        chunk = response_stream.read(256)
         if not chunk:
             break
         buf += chunk
         if len(buf) > max_buf:
             buf = buf[-max_buf:]
-        idx = buf.find(key_bytes)
-        if idx != -1:
-            start = idx + len(key_bytes)
-            end = buf.find(b'"', start)
-            if end != -1:
-                return buf[start:end].decode("utf-8")
+        match = regex.search(buf)
+        if match:
+            return match.group(1).decode("utf-8")
     return None
 
 def fetch_first_station_id(obs_station_url, headers):
@@ -995,63 +1269,279 @@ def get_nws_metadata(lat, lon):
         sys.print_exception(e)
         return None
 
+import time
+
+def parse_iso8601(s):
+    """
+    Parse ISO8601 string like '2025-06-19T12:56:00+00:00'
+    Returns (year, month, day, hour, minute, second)
+    """
+    try:
+        date_str, time_str = s.split('T')
+        year, month, day = map(int, date_str.split('-'))
+        time_part = time_str.split('+')[0].split('-')[0]  # Remove timezone offset
+        hour, minute, second = map(int, time_part.split(':'))
+        return (year, month, day, hour, minute, second)
+    except Exception as e:
+        print("Error parsing ISO8601:", e)
+        return None
+
+def to_epoch_seconds(t):
+    """
+    Convert tuple (year, month, day, hour, minute, second) to epoch seconds
+    """
+    if t is None:
+        return None
+    # time.mktime expects struct_time tuple with at least 8 elements
+    tm = (t[0], t[1], t[2], t[3], t[4], t[5], 0, 0, 0)
+    return time.mktime(tm)
+
+def find_period_bounds(raw, pos):
+    """
+    Given position of '"number":' in raw JSON,
+    find the start and end indices of the full JSON object
+    enclosing that number field by matching braces.
+    """
+    # Find the start brace '{' just before pos
+    start = raw.rfind('{', 0, pos)
+    if start == -1:
+        start = pos  # fallback
+
+    # Now scan forward to find matching closing '}'
+    depth = 0
+    for i in range(start, len(raw)):
+        if raw[i] == '{':
+            depth += 1
+        elif raw[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return start, i
+    # fallback if no match found
+    return start, len(raw) - 1
+
+def extract_forecast_periods_stream(response_stream, max_night_periods=3, max_day_periods=7, max_buf=4096):
+    buf = b""
+    periods = []
+    idx = 0
+    day_count = 0
+    night_count = 0
+    in_periods = False # only start extracting after "periods"
+
+    def find_balanced_braces_stream(text, start_idx):
+        brace_count = 0
+        started = False
+        for i in range(start_idx, len(text)):
+            c = text[i]
+            if c == ord('{'):
+                brace_count += 1
+                started = True
+            elif c == ord('}'):
+                brace_count -= 1
+                if brace_count == 0 and started:
+                    return i
+        return -1
+
+    # Precompile regexes for fields
+    pattern_name = ure.compile(rb'"name"\s*:\s*"([^"]*)"')
+    pattern_shortForecast = ure.compile(rb'"shortForecast"\s*:\s*"([^"]*)"')
+    pattern_temperature = ure.compile(rb'"temperature"\s*:\s*(\d+)')
+    pattern_isDaytime = ure.compile(rb'"isDaytime"\s*:\s*(true|false)')
+
+    def extract_str(pattern, text):
+        m = pattern.search(text)
+        return m.group(1).decode("utf-8") if m else ""
+
+    def extract_int(pattern, text):
+        m = pattern.search(text)
+        try:
+            return int(m.group(1)) if m else None
+        except:
+            return None
+
+    def extract_bool(pattern, text):
+        m = pattern.search(text)
+        return m.group(1) == b"true" if m else False
+
+    while True:
+        chunk = response_stream.read(256)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > max_buf:
+            # Keep only the most recent data, but preserve unprocessed tail
+            unprocessed = buf[idx:]
+            buf = unprocessed[-max_buf:]
+            idx = 0  # reset index because buffer changed
+
+        while True:
+            if not in_periods:
+                periods_start = buf.find(b'"periods": [',idx)
+                if periods_start == -1:
+                    break # wait for more data
+                idx = periods_start + len(b'"periods": [')
+                in_periods = True
+                
+            num_idx = buf.find(b'"number":', idx)
+            if num_idx == -1:
+                break  # No more periods found in buffer yet
+
+            # Find the '{' before num_idx
+            start_obj = buf.rfind(b'{', 0, num_idx)
+            if start_obj == -1 or start_obj < idx:
+                # fallback: find next '{' after num_idx
+                start_obj = buf.find(b'{', num_idx)
+                if start_obj == -1:
+                    break  # can't find object start, wait for more data
+
+            end_obj = find_balanced_braces_stream(buf, start_obj)
+            if end_obj == -1:
+                # incomplete JSON object; wait for more data
+                break
+
+            period_text = buf[start_obj:end_obj+1]
+
+            # Extract fields
+            name = extract_str(pattern_name, period_text)
+            shortForecast = extract_str(pattern_shortForecast, period_text)
+            temperature = extract_int(pattern_temperature, period_text)
+            isDaytime = extract_bool(pattern_isDaytime, period_text)
+
+            should_append = False
+            if isDaytime and day_count < max_day_periods:
+                day_count += 1
+                should_append = True
+            elif not isDaytime and night_count < max_night_periods:
+                night_count += 1
+                should_append = True
+
+            if should_append:
+                periods.append({
+                    "name": name,
+                    "shortForecast": shortForecast,
+                    "temperature": temperature,
+                    "isDaytime": isDaytime,
+                })
+                
+            if day_count >= max_day_periods and night_count >= max_night_periods:
+                return periods
+
+            idx = end_obj + 1
+
+        # Reset index if we have parsed beyond buffer end
+        if idx >= len(buf):
+            idx = 0
+
+    return periods
+
+#def extract_forecast_periods(raw_forecast):
+#    """
+#    Stream-parse raw_forecast JSON text and extract forecast periods.
+#    Returns a list of dicts with keys: name, shortForecast, temperature, isDaytime.
+#    """
+    
+#    # Precompile regex patterns (memory safe)
+#    pattern_name = ure.compile(r'"name"\s*:\s*"([^"]*)"')
+#    pattern_shortForecast = ure.compile(r'"shortForecast"\s*:\s*"([^"]*)"')
+#    pattern_temperature = ure.compile(r'"temperature"\s*:\s*(\d+)')
+#    pattern_isDaytime = ure.compile(r'"isDaytime"\s*:\s*(true|false)')
+
+#    def find_balanced_braces(text, start_idx):
+#        brace_count = 0
+#        started = False
+#        for i in range(start_idx, len(text)):
+#            c = text[i]
+#            if c == '{':
+#                brace_count += 1
+#                started = True
+#            elif c == '}':
+#                brace_count -= 1
+#                if brace_count == 0 and started:
+#                    return i
+#        return -1
+
+#    def extract_str(pattern, text):
+#        m = pattern.search(text)
+#        if m:
+#            return m.group(1)
+#        return ""
+
+#    def extract_int(pattern, text):
+#        m = pattern.search(text)
+#        if m:
+#            try:
+#                return int(m.group(1))
+#            except:
+#                return None
+#        return None
+
+#    def extract_bool(pattern, text):
+#        m = pattern.search(text)
+#        if m:
+#            return m.group(1) == "true"
+#        return False
+
+#    periods = []
+#    max_day_night_periods = 4
+#    max_daytime_only_periods = 7
+
+#    idx = 0
+#    length = len(raw_forecast)
+#    daynight_collected = 0
+#    daytime_only_collected = 0
+
+#    while idx < length and (daynight_collected + daytime_only_collected) < (max_day_night_periods + max_daytime_only_periods):
+#        num_idx = raw_forecast.find('"number":', idx)
+#        if num_idx == -1:
+#            break
+
+#        # Find start of object by locating '{' before or at num_idx
+#        start_obj = raw_forecast.rfind('{', 0, num_idx)
+#        if start_obj == -1 or start_obj < idx:
+#            # fallback to find next '{' after num_idx
+#            start_obj = raw_forecast.find('{', num_idx)
+#            if start_obj == -1:
+#                break
+
+#        end_obj = find_balanced_braces(raw_forecast, start_obj)
+#        if end_obj == -1:
+#            break
+
+#        period_text = raw_forecast[start_obj:end_obj+1]
+
+#        name = extract_str(pattern_name, period_text)
+#        shortForecast = extract_str(pattern_shortForecast, period_text)
+#        temperature = extract_int(pattern_temperature, period_text)
+#        isDaytime = extract_bool(pattern_isDaytime, period_text)
+
+#        if daynight_collected < max_day_night_periods:
+#            periods.append({
+#                "name": name,
+#                "shortForecast": shortForecast,
+#                "temperature": temperature,
+#                "isDaytime": isDaytime,
+#            })
+#            daynight_collected += 1
+#        else:
+#            if isDaytime and daytime_only_collected < max_daytime_only_periods:
+#                periods.append({
+#                    "name": name,
+#                    "shortForecast": shortForecast,
+#                    "temperature": temperature,
+#                    "isDaytime": isDaytime,
+#                })
+#                daytime_only_collected += 1
+
+#        idx = end_obj + 1
+#        gc.collect()
+
+#    return periods
 
 def get_weather_data(lat, lon, metadata, headers):
     try:
-#        headers = {"User-Agent": USER_AGENT}
 
-        # Step 1: Get point data - forecast and observation stations
-#        print("fetching URL:", f"https://api.weather.gov/points/{lat},{lon}")
-#        r = urequests.get(f"https://api.weather.gov/points/{lat},{lon}", headers=headers)
-#        raw = r.text
-#        print("Downloaded length:", len(raw))  # Debug: size of JSON string
-#        r.close()
-
-        # Parse full JSON only after raw text is safely loaded
-#        point_data = json.loads(raw)
-        
-#        print("Keys in point_data:", list(point_data.keys()))  # Debug keys in JSON
-
-        # Extract only the needed URLs to minimize retained data in memory
-#        forecast_url = point_data["properties"]["forecast"]
-#        obs_station_url = point_data["properties"]["observationStations"]
-#        forecast_hourly_url = point_data["properties"].get("forecastHourly")
-        
-        # Directly extract grid identifiers for constructing hourly URLs
-#        office = point_data["properties"]["gridId"]
-#        grid_x = point_data["properties"]["gridX"]
-#        grid_y = point_data["properties"]["gridY"]
-
-        # Build the base gridpoint URL
-#        gridpoint_url      = f"https://api.weather.gov/gridpoints/{office}/{grid_x},{grid_y}"
-        
-        # Choose the best available hourly forecast URL
-#        if not forecast_hourly_url:
-#            print("No forecastHourly URL found in point data; falling back to constructed gridpoint URL.")
-#            hourly_url = gridpoint_url + "/forecast/hourly"
-#        else:
-#            hourly_url = forecast_hourly_url  # NOTE: Use hourly_url, NOT gridpoint or forecast_hourly
-        
-        # Clean up the large JSON object ASAP
-#        del point_data
-#        gc.collect()
-
-        # Step 2: Get observation stations list for the location
-#        print("Fetching URL:", obs_station_url)
-
-        # Use the helper to extract the first stationIdentifier
-#        station_id = fetch_first_station_id(obs_station_url, headers)
-#        r.close
-#        gc.collect()
-        # If not found, return None to indicate failure
-#        if not station_id:
-#            temp_c = humidity = None
-#            return None
-
-        # Free memory
-#        del raw
-#        gc.collect()
-        
+        # Unload fonts to free up memory
+#        unload_all_fonts()
+        periods = []
         # Validate cached metadata
         station_id = metadata.get("station_id")
         forecast_url = metadata.get("forecast_url")
@@ -1067,184 +1557,118 @@ def get_weather_data(lat, lon, metadata, headers):
             forecast_url = metadata.get("forecast_url")
             hourly_url = metadata.get("hourly_url")
 
-        # Fetch latest observations    
-        temp_c = None
-        temp_f = None
-        humidity = None
-
-        station_url =  f"https://api.weather.gov/stations/{station_id}/observations/latest"
-        print("Fetching observation data:", station_url)
-
-        try:
-            # Stream the observation response and extract temp/humidity
-            r = urequests.get(station_url, headers=headers)
-
-            # Patterns to match "temperature": { "value": ... } and same for humidity
-            pattern_temp = rb'"temperature"\s*:\s*\{[^}]*"value"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
-            pattern_hum = rb'"relativeHumidity"\s*:\s*\{[^}]*"value"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
-
-            temp_c_val = extract_first_number_stream_generic(r.raw, pattern_temp)
-            r.close()
-
-            # If temp extraction succeeded, we reopen and stream again for humidity
-            if temp_c_val is not None:
-                r = urequests.get(station_url, headers=headers)
-                humidity_val = extract_first_number_stream_generic(r.raw, pattern_hum)
-                r.close()
-            else:
-                humidity_val = None
-
-            gc.collect()
-
-            if isinstance(temp_c_val, float):
-                temp_c = temp_c_val
-                temp_f = round(temp_c * 9 / 5 + 32)
-                print("Streamed Temperature (°C):", temp_c)
-            else:
-                print("Temp not found in streamed obs.")
-                temp_c = temp_f = None
-
-            if isinstance(humidity_val, float):
-                humidity = int(humidity_val)
-                print("Streamed Humidity (%):", humidity)
-            else:
-                print("Humidity not found in streamed obs.")
-                humidity = None
-
-        except Exception as e:
-            print("Error streaming observation data:", e)
-            temp_c = temp_f = humidity = None
-            
-#            r = urequests.get(station_url, headers=headers)
-            
-#            raw = r.text
-#            print("Downloaded length (obs):", len(raw))
-#            r.close()
-
-#            obs_json = json.loads(raw)
-
-#            temp_c = obs_json["properties"]["temperature"]["value"]
-#            print("Parsed Temperature (°C):", temp_c)
-
-#            humidity = obs_json["properties"]["relativeHumidity"]["value"]
-#            print("Parsed Humidity (%):", humidity)
-
-#            del raw
-#            del obs_json
-#            gc.collect()
-
-#            if temp_c is not None:
-#                temp_f = round(temp_c * 9 / 5 + 32)
-
-#        except Exception as e:
-#            print("Error fetching or parsing observation data:", e)
-
-        # Fallback to hourly forecast if needed
-        
-        # +++ TEST ++++
-        #temp_c = None  # Set to None to test hourly_forecast fetch
-        #humidity = None # Set to None to test hourly_forecast fetch
-        # +++ TEST ++++
-        
-        if temp_c is None or humidity is None:
-            print("Falling back to hourly forecast for missing data...")
-            print("Fetching URL:", hourly_url)
-            
-            # Pattern to match a flat "temperature": 72  (first occurrence)
-            pattern_temp = rb'"temperature"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
- 
-            try:
-                r = urequests.get(hourly_url, headers=headers)
-                temp_f_fb = extract_first_number_stream_generic(r.raw, pattern_temp)
-                r.close()
-                gc.collect()
-                print("Stream-fallback Temp (°F):", temp_f_fb)
-
-                if temp_c is None:
-                    if isinstance(temp_f_fb, float):
-                        temp_f = round(temp_f_fb)
-                        temp_c = round((temp_f_fb - 32) * 5 / 9)
-                    else:
-                        temp_f = 0
-                        temp_c = 0
-                        print("Stream fallback didn’t find valid temperature; defaulting to 0.")
-
-            except Exception as e:
-                print("Error streaming temperature fallback:", e)
-                temp_c = temp_f = 0
-
-            # Pattern to match the nested "relativeHumidity": { … "value": 54 }
-            pattern_hum = rb'"relativeHumidity"\s*:\s*\{[^}]*"value"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
-
-            try:
-                # --- Humidity fallback (%) ---
-                r = urequests.get(hourly_url, headers=headers)
-                humidity_fb = extract_first_number_stream_generic(r.raw, pattern_hum)
-                r.close()
-                gc.collect()
-                print("Stream-fallback Humidity (%):", humidity_fb)
-                
-                if humidity is None:
-                    if isinstance(humidity_fb, float):
-                        humidity = int(humidity_fb)
-                    else:
-                        print("Stream fallback didn’t find valid humidity; defaulting to 0.")
-                        humidity = 0
-
-            except Exception as e:
-                print("Error streaming humidity fallback:", e)
-                humidity = 0
-
-        # Final safety check
-        if temp_f is None:
-            temp_f = 0
-        if humidity is None:
-            humidity = 0
-
-        # Get forecast dataprint("Before fetching forecast JSON:")
+        # D0 forecast fetch for multi=day forecast
         print("Fetching URL:", forecast_url)
         print("Before fetching forecast JSON:")
         print_memory_usage()
-
+        test_free_memory()
+        
+        period = []
         try:
             r = urequests.get(forecast_url, headers=headers)
-            raw_forecast = r.text
-            print("Downloaded length (forecast):", len(raw_forecast))
+            gc.collect()
+            
+            periods = extract_forecast_periods_stream(r.raw)
+            gc.collect()
             r.close()
+            del r
+            gc.collect()
+            
+            # DEBUG: print what was parsed
+            print("Parsed forecast periods:")
+            for i, f in enumerate(periods):
+                print(f"Period {i}: name={f['name']!r}, shortForecast={f['shortForecast']!r}")
 
             print("After fetching forecast JSON (raw text in memory):")
             print_memory_usage()
-            
-            # Extract shortForecast from first forecast period
-            forecast = extract_first_json_string_value(raw_forecast, "shortForecast")
-            if not forecast:
-                forecast = "N/A"
+            test_free_memory()
 
-            print("After extracting shortForecast:")
+            # Extract multiple forecast periods
+#             periods = extract_forecast_periods(raw_forecast)
+            # Post-process each period to simplify forecast and trim name
+            for period in periods:
+                period["simpleForecast"] = simplify_forecast(period["shortForecast"])
+                
+            if not periods:
+                periods = [{
+                    "name": "N/A",
+                    "shortForecast": "N/A",
+                    "simpleForecast": "N/A",
+                    "temperature": None,
+                    "isDaytime": None,
+                }]
+            
+            print(f"Extracted {len(periods)} forecast periods")
+            for i, period in enumerate(periods):
+                print(f"Period {i}: name='{period.get('name', '')}'")
+                print(f"Period {i}: shortForecast='{period.get('shortForecast', '')}'")
+                print(f"Period {i}: simpleForecast='{period.get('simpleForecast', '')}'")
+            print("After extracting forecast periods")
             print_memory_usage()
-    
-            # Free memory from forecast JSON
-            del raw_forecast
-            gc.collect()
 
             print("After freeing raw forecast JSON and running GC:")
             print_memory_usage()
             
         except Exception as e:
             print("Error fetching or parsing forecast data:", e)
-            forecast = "N/A"
-            
+            periods = [{
+                "name": "N/A",
+                "shortForecast": "N/A",
+                "simpleForecast": "N/A",
+                "temperature": None,
+                "isDaytime": None,
+            }]
+                  
         # Return the final values
-        return temp_f, humidity, forecast
+        return periods
 
     except Exception as e:
         print("Error in get_weather_data:", e)
         sys.print_exception(e)
+        # reload fonts
+#        load_font("sm")
+#        load_font("lg")
+#        load_font("huge")
+        
         return None, None, None
 
+def shorten_period_name(name):
+    """Shorten forecast period names to fit within 14 characters."""
+    if not name:
+        return ""
+
+    name = name.strip()
+
+    # Mapping for known long holidays
+    holiday_map = {
+        "Thanksgiving Day": "Thanksgiving",
+        "Christmas Day": "Christmas",
+        "Christmas Night": "Xmas Night",
+        "New Year's Day": "New Year",
+        "New Year's Night": "New Year Night",
+        "Independence Day": "July 4",
+        "Washington's Birthday": "Presidents",
+        "Martin Luther King Jr. Day": "MLK Day",
+    }
+
+    if name in holiday_map:
+        return holiday_map[name]
+
+    # Handle "<Day of Week> Night" → "Mon Night"
+    if name.endswith("Night"):
+        parts = name.split()
+        if len(parts) == 2 and parts[1] == "Night":
+            day = parts[0]
+            return day[:3] + " Night"
+
+    # Just shorten long day names if needed
+    if len(name) > 14:
+        return name[:14]  # truncate if absolutely necessary
+
+    return name
 
 def simplify_forecast(forecast):
-    MODIFIERS = ["Slight Chance", "Chance", "Mostly", "Partly", "Likely", "Scattered", "Isolated"]
+    MODIFIERS = ["Slight Chance", "Light", "Chance", "Mostly", "Partly", "Likely", "Heavy", "Scattered", "Isolated"]
     CONDITIONS = [
         "Tornado", "Hailstorm", "Hailstorms", "Blizzard", "Winter Storm", "Winter Weather"
         "Freezing Rain", "Freezing Drizzle", "Hail", "Sleet", "Ice", "Frost",
@@ -1360,44 +1784,73 @@ def simplify_forecast(forecast):
     return phrase[:14]
 
     
-def display_weather(temp, humidity, forecast):
+def display_weather(interval, temp, humidity, description, is_daytime=None):
     # Clear only the areas we'll update (not the whole screen)
 #     display.fill_rect(0, 0, 240, 60, color565(0, 0, 0))     # header
     display.fill_rect(0, 60, 240, 180, color565(0, 0, 0))   # lower part
     
-    line = simplify_forecast(forecast)
-    icon_x = (240 - 64) // 2
-    draw_weather_icon(display, line, icon_x, 70)    
-    # Display 14 character weather conditions
-    
-    center_lgtext(line, 140, color565(255, 255, 0))
 
-    display.text(font_huge, f"{temp}F", 50, 170, color565(255, 100, 100))  # pass in 8-bit RGB
-    #display.text(font_huge, f"{temp}F", 50, 170, 0xfa45)  # Pass in rgb565
-    display.text(font_huge, f"{int(humidity)}%", 130, 170, color565(100, 255, 100))
+    center_lgtext(f"{interval}", 125, color565(220, 170, 240))
+    line = description
+    icon_x = (240 - 63) // 2  # Centered icon
+    draw_weather_icon(display, line, icon_x, 60, is_daytime)
     
-def format_12h_time(t):
-    hour = t[3]
-    am_pm = "AM"
-    if hour == 0:
-        hour_12 = 12
-    elif hour > 12:
-        hour_12 = hour - 12
-        am_pm = "PM"
-    elif hour == 12:
-        hour_12 = 12
-        am_pm = "PM"
+    # Display 14 character weather conditions
+    center_hugetext(line, 140, color565(255, 255, 0))
+
+    if humidity is not None:
+        display.text(font_huge, f"{temp}F", 50, 175, color565(255, 100, 100))
+        display.text(font_huge, f"{int(humidity)}%", 130, 175, color565(100, 255, 100))
     else:
-        hour_12 = hour
-    # Return H:M:S AM/PM
-#    return "{:2d}:{:02d}:{:02d} {}".format(hour_12, t[4], t[5], am_pm)
-    # Return H:M AM/PM
-    return "{:2d}:{:02d} {}".format(hour_12, t[4], am_pm)
+        try:
+            prefix = "High: " if is_daytime else "Low: "
+            t_val = int(temp)
+            temp_str = f"{prefix}{t_val}F"
+        except:
+            temp_str = f"{temp}F" # fallback
+        center_hugetext(temp_str, 175, color565(255, 100, 100))
+        
+def format_sun_time(t):
+    # t is a time.struct_time or tuple like (year, month, day, hour, minute, second, ...)
+    hour = t[3]
+    minute = t[4]
+    second = t[5]
+    # Round up if seconds >= 30
+    if second >= 30:
+        minute += 1
+        if minute >= 60:
+            minute = 0
+            hour += 1
+            if hour >= 24:
+                hour = 0            
+    am_pm = "AM" if hour < 12 else "PM"
+    hour_12 = hour % 12
+    if hour_12 == 0:
+        hour_12 = 12
+    return f"{hour_12}:{minute:02d} {am_pm}"
+
+def display_sun_times(sunrise, sunset):
+    display.fill_rect(0, 60, 240, 180, color565(0, 0, 0))  # Clear lower part
+    
+    if sunrise and sunset:
+        sunrise_str = format_sun_time(sunrise)
+        sunset_str = format_sun_time(sunset)
+        
+        center_lgtext("Sunrise:", 80, color565(255, 255, 0))
+        center_hugetext(sunrise_str, 100, color565(255, 255, 0))
+        center_lgtext("Sunset:", 140, color565(255, 160, 0))
+        center_hugetext(sunset_str, 160, color565(255, 160, 0))
+        
 # === Weather Program ===
 def application_mode(settings):
-    print("Entering application mode.")
+    
+    print("Free memory entering application mode")
+    test_free_memory()
+    
     global start_update_requested
-#    global gmt_offset
+    global gmt_offset
+    global sunrise, sunset, last_sun_fetch_day, last_displayed_time, last_displayed_date, last_sun_update_date
+    global retry_allowed
 
     lat = settings["lat"]
     lon = settings["lon"]
@@ -1407,23 +1860,46 @@ def application_mode(settings):
     apply_gmt_offset_from_settings(settings)
     
     last_sync = time.time()
-    last_weather_update = last_sync
-    temp = humidity = forecast = None
+    last_weather_update = time.time()
+    temp = humidity = None
+    forecasts = []
     last_displayed_time = ""
     last_displayed_date = ""
     
     # Determine Latitude and Longitude
 #    lat, lon = get_lat_lon(zip_code)
     lat_lon_complete = lat is not None and lon is not None
-    if not lat_lon_complete:
-        print("Lat/lon not available, attempting lookup...")
-        lat, lon = get_lat_lon(zip_code)
+
+    if not lat_lon_complete and retry_allowed:
+        print("Lat/lon not available, attempting Zip lookup...")
+        lat, lon, reason = get_lat_lon(settings.get("zip", "").strip())
         lat_lon_complete = lat is not None and lon is not None
         if lat_lon_complete:
-            print(f"Recovered lat/lon: {lat}, {lon}")
+            print(f"Zip to lat/lon lookup OK: {lat}, {lon}")
             settings["lat"] = lat
             settings["lon"] = lon
             save_settings(settings)
+            # Update local variables with new values
+            lat = settings["lat"]
+            lon = settings["lon"]
+        else:
+            print(f"Failed to recover lat/lon. Reason: {reason}")
+            if reason == "invalid_zip":
+                print("Invalid ZIP detected — going to setup mode")
+                retry_allowed = False
+                display.fill(0)
+                center_lgtext("Location Error", 80)
+                center_smtext(reason, 100)
+                center_smtext("Going to Setup Mode", 120)
+                for count in range(5,0, -1):
+                    display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))
+                    center_smtext(f"in {count} seconds", 160)
+                    time.sleep(1)
+                            
+                setup_mode()
+                server.run()
+            else:
+                print("Temporary lat/lon lookup issue — retry on next loop.")
             
     print("Latitude:", lat)
     print("Longitude:", lon)
@@ -1440,35 +1916,38 @@ def application_mode(settings):
             cached_station_id = metadata["station_id"]
         else:
             print("Warning: Failed to fetch metadata. Will attempt fetch in get_weather_data.")
-    
-    # Get time zone UTC offset from lat and lon
-#    gmt_offset = get_gmt_offset(lat, lon) if lat_lon_complete else None
-#    if gmt_offset is None:
-#        gmt_offset = 0  # fallback to UTC
-#        gmt_offset_complete = False
-#    else:
-#        gmt_offset_complete = True
 
     # Initial weather fetch
     if lat_lon_complete:
         headers = {"User-Agent": USER_AGENT}
-        new_data = get_weather_data(lat, lon, metadata, headers)
-        if new_data:
-            temp, humidity, forecast = new_data
-            print(f"Updated: Temp: {temp}F, Humidity: {humidity}%, Forecast: {forecast}")
-            display_weather(temp, humidity, forecast)
+        new_forecasts = get_weather_data(lat, lon, metadata, headers)
+        if new_forecasts:
+            forecasts = new_forecasts
+            
+            # Fetch initial sunrise/sunset (we already have gmt_offset and dst from settings)
+            sunrise, sunset = fetch_sunrise_sunset(lat, lon, gmt_offset)
+
+            cycle_length = len(forecasts) + 1
+            
+            print("Sunrise: ", format_sun_time(sunrise))
+            print("Sunset: ", format_sun_time(sunset))
+            display_sun_times(sunrise, sunset)
+
         else:
-            temp, humidity, forecast = None, None, None
+            forecasts = []
+            cycle_length = 1
             display.fill(color565(0, 0, 0))
             center_lgtext("Weather data", 80)
             center_lgtext("unavailable", 100)
-            
     else:
+        forecasts = []
+        cycle_length = 1
         display.fill(color565(0, 0, 0))
         center_lgtext("Location data", 80)
         center_lgtext("unavailable", 100)
-
-    last_weather_update = time.time()
+        
+    cycle_index = 1  # Start  with forecast, sunrise/sunset already displayed
+    last_forecast_switch = time.time()  # ensures your display cycle works on the correct timing
 
     while True:
         if start_update_requested:
@@ -1486,37 +1965,81 @@ def application_mode(settings):
             sync_time()
             last_sync = current_time
     
-        # Refresh weather WEATH_INTERVAL (5 min/300 sec) 
+        # Refresh forecasts WEATH_INTERVAL (30 min/1800 sec) 
         if current_time - last_weather_update >= WEATH_INTERVAL:
-            if not lat_lon_complete:
-                print("Lat/lon not available, attempting lookup...")
-                lat, lon = get_lat_lon(zip_code)
+            if not lat_lon_complete and retry_allowed:
+                print("Lat/lon not available, attempting Zip lookup...")
+                lat, lon, reason = get_lat_lon(settings.get("zip", "").strip())
                 lat_lon_complete = lat is not None and lon is not None
                 if lat_lon_complete:
                     print(f"Recovered lat/lon: {lat}, {lon}")
                     settings["lat"] = lat
                     settings["lon"] = lon
                     save_settings(settings)
-#            # Retry gmt offset if gmt offset not yet obtained
-#            if not gmt_offset_complete and lat_lon_complete:
-#                gmt_offset = get_gmt_offset(lat, lon)
-#                gmt_offset_complete = gmt_offset is not None
-#                if gmt_offset_complete:
-#                    print(f"Recovered GMT offset: {gmt_offset}")
+                    # Update local variables with new values
+                    lat = settings["lat"]
+                    lon = settings["lon"]
+                else:
+                    print(f"Failed to recover lat/lon. Reason: {reason}")
+                    if reason == "invalid_zip":
+                        print("Invalid ZIP detected — going to setup mode")
+                        retry_allowed = False
+                        display.fill(0)
+                        center_lgtext("Location Error", 80)
+                        center_smtext(reason, 100)
+                        center_smtext("Going to Setup Mode", 120)
+                        for count in range(5,0, -1):
+                            display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))
+                            center_smtext(f"in {count} seconds", 160)
+                            time.sleep(1)
+                            
+                        setup_mode()
+                        server.run()
+                    # Possibly show fallback display here
+                    else:
+                        print("Temporary lat/lon lookup issue — retry on next loop.")
                 
             if lat_lon_complete:     
-                new_data = get_weather_data(lat, lon, metadata, headers)
-                if new_data:
-                    temp, humidity, forecast = new_data
-                    print(f"Updated: Temp: {temp}F, Humidity: {humidity}%, Forecast: {forecast}")
-                    display_weather(temp, humidity, forecast)
+                new_forecasts = get_weather_data(lat, lon, metadata, headers)
+                if new_forecasts:
+                    forecasts = new_forecasts
+                    cycle_length = len(forecasts) + 1
                 else:
-                    temp, humidity, forecast = None, None, None
+                    forecasts = []
+                    cycle_length = 1
                     display.fill_rect(0, 60, 240, 180, color565(0, 0, 0)) # x, y, w, h
                     center_lgtext("Weather Data", 80)
                     center_lgtext("Unavailable", 100)
+            
             last_weather_update = current_time
 
+        # Cycle display every 10 seconds
+        if current_time - last_forecast_switch >= 10:
+            print(f"Cycle index: {cycle_index}, Cycle length: {cycle_length}")
+            if cycle_index == 0:
+                # Show sunrise/sunset
+                display_sun_times(sunrise, sunset)
+
+            elif forecasts and (cycle_index - 1) < len(forecasts):
+                forecast = forecasts[cycle_index-1]
+                interval = shorten_period_name(forecast.get("name", "Forecast"))
+                forecast_text = forecast.get("simpleForecast", "N/A")
+                f_temp = forecast.get("temperature") or 0
+                humidity = None
+                is_day = forecast.get("isDaytime", None)
+
+                print(f"Interval: {interval}")
+                print(f"Forecast text: {forecast_text}")
+                display_weather(interval, f_temp, None, forecast_text, is_daytime=is_day)
+            else:
+                # Safety fallback if forecasts not ready
+                display_weather("N/A", None, None, "N/A")
+                    
+            last_forecast_switch = current_time
+            cycle_index += 1
+            if cycle_index >= cycle_length:
+                cycle_index = 0
+                
         # Get localtime *once* per loop
         now = localtime_with_offset()
         current_time_str = format_12h_time(now)
@@ -1527,10 +2050,22 @@ def application_mode(settings):
             update_time_only(current_time_str)
             last_displayed_time = current_time_str
             
-        # Optional: update date only when it changes
+        # Update date only when it changes
         if current_date_str != last_displayed_date:
             update_date_only(current_date_str)
             last_displayed_date = current_date_str
+
+        # Inline sunrise/sunset update logic: fetch once per local day, shortly after midnight (e.g. between 00:01 and 00:10)
+        if last_sun_update_date != current_date_str:
+        # Extract hour and minute from now (assuming now = (year, month, day, hour, minute, sec, wday, yday))
+            hour = now[3]
+            minute = now[4]
+
+            if hour == 0 and 1 <= minute <= 10:
+                # Time to fetch sunrise/sunset for the new day
+                print("Fetching new sunrise/sunset data for date:", current_date_str)
+                sunrise, sunset = fetch_sunrise_sunset(lat, lon, gmt_offset)
+                last_sun_update_date = current_date_str
 
         time.sleep(0.1)  # Short sleep to maintain responsiveness
 
@@ -1540,6 +2075,9 @@ def application_mode(settings):
 # ===                If Wifi connection OK, go to Weather program ===
 # Figure out which mode to start up in...
 try:
+    print("=== Free memory at start of main code ===")
+    test_free_memory()
+    
     # See if setup wifi switch is pressed
     if setup_sw.value() == False:
         t = 50  # Switch must be pressed for 5 seconds to reset wifi config
@@ -1547,40 +2085,23 @@ try:
             t -= 1
             time.sleep(0.1)
         if setup_sw.value() == False:
-            print("Setup switch ")
-            os.remove(SETTINGS_FILE)
-            machine_reset()
+            print("Setup switch - entering setup mode")
+            setup_mode()
+            server.run()
             
     # See if settings.txt is there and valid
-    status, settings = load_settings()
-    if status == "missing":
-        # Display no settings file message and go to initial setup
+    status, settings, reason = load_settings()
+    if status in ("missing", "invalid", "corrupt"):
+        # Display reason for error in settings
         display.fill(color565(0, 0, 0))
-        center_smtext("No Settings File Found", 80)
-        center_smtext("Going to Initial Setup Screen", 120)
+        center_lgtext("Settings Error", 60)
+        center_smtext(reason, 80)
+        center_smtext("Entering Setup Mode", 120)
         for count in range(5,0, -1):   # Count down from 5 to 1
             display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))  # Clears 1 text line
             center_smtext(f"in {count} seconds", 140)
             time.sleep(1)
-        print("Settings file not found. Entering setup mode.")
-        setup_mode()
-        server.run()
-        
-    elif status in ("invalid", "corrupt"):
-        # Display no settings file message and go to initial setup
-        display.fill(color565(0, 0, 0))
-        center_smtext("Settings File Invalid", 80)
-        center_smtext("Going to Initial Setup Screen", 120)
-        for count in range(5,0, -1):   # Count down from 5 to 1
-            display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))  # Clears 1 text line
-            center_smtext(f"in {count} seconds", 140)
-            time.sleep(1)
-        print("Settings file invalid or corrupted. Entering Setup Mode")
-        # delete file and enter setup mode:
-        try:
-            os.remove(SETTINGS_FILE)
-        except:
-            pass
+        print(f"Settings status = {status}. Reason: {reason}. Entering setup mode")
         setup_mode()
         server.run()
 
@@ -1591,12 +2112,10 @@ try:
     # Display P&L Logo
     print("Displaying logo")
     display.fill(rgb888_to_rgb565(255, 254, 140))
-#    image_path = "/icons/pl_logo_sparse_1bit.raw"
-#    draw_sparse_1bit(display, image_path)
+
     image_path = "/icons/pl_logo_sparse_gryscl.raw"
     draw_sparse_grayscale(display, image_path)
-#    image_path = "/icons/pl_logo_120_rgb565.raw"
-#    display_raw_image_in_chunks(display, image_path, 0, 0, 120, 120, scale=2, smooth=True)
+
     time.sleep(3)
     
     # Try to connect to Wifi
@@ -1610,14 +2129,14 @@ try:
         display.fill(color565(0, 0, 0))
         center_smtext("Connecting to", 40, color565(173, 216, 230))
         center_smtext("WiFi Network SSID:", 60, color565(173, 216, 230))
-        center_smtext(f"{settings['ssid']}", 100, color565(255, 255, 0))
+        center_lgtext(f"{settings['ssid']}", 100, color565(255, 255, 0))
         ip_address = connect_to_wifi(settings["ssid"], settings["password"])
         if is_connected_to_wifi():
             print(f"Connected to wifi, IP address {ip_address}")
                 
             display.fill(color565(0, 0, 0))
             center_lgtext("Peony & Lemon",60, color565(255, 254, 140))
-            center_lgtext("Mini Weather",80, color565(255, 254, 140))
+            center_lgtext("Forecaster",80, color565(255, 254, 140))
             center_smtext(f"v{__version__}",100)
             center_smtext("Connected:", 120, color565(173, 216, 230))
             center_smtext(f"WiFi SSID: {settings['ssid']}", 140, color565(173, 216, 230))
@@ -1633,20 +2152,33 @@ try:
     if is_connected_to_wifi():
 #        zip_code = settings["zip"]
 #        application_mode(zip_code)
-        if "lat" not in settings or "lon" not in settings:
-            zip_code = settings["zip"]
-            lat, lon = get_lat_lon(zip_code)
+        if not settings.get("lat") or not settings.get("lon"):
+            zip_code = settings.get("zip", "").strip()
+            lat, lon, reason = get_lat_lon(zip_code)
             if lat is not None and lon is not None:
                 settings["lat"] = lat
                 settings["lon"] = lon
                 save_settings(settings)
             else:
-                print("Lat/lon lookup failed — not updating settings.json")
+                print("Lat/lon lookup failed:", reason)
+                
+                # Show error on display and go to setup mode
+                display.fill(0)
+                center_lgtext("Location Error", 80)
+                center_smtext(reason, 100)
+                center_smtext("Going to Setup Mode", 120)
+                for count in range(5,0, -1):   # Count down from 5 to 1
+                    display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))  # Clears 1 text line
+                    center_smtext(f"in {count} seconds", 160)
+                    time.sleep(1)
+
+                setup_mode()
+                server.run()
                 
         application_mode(settings)
 
     else:
-        # Bad configuration, delete the credentials file, reboot
+        # Bad configuration, reboot
         # into setup mode to get new credentials from the user.
         wlan = network.WLAN(network.STA_IF)
         status = wlan.status()
@@ -1657,18 +2189,18 @@ try:
         display.fill(color565(0, 0, 0))
         center_smtext("WiFi Connect Failed:", 80)
         center_smtext(msg,100)
-        center_smtext("Going to Initial Setup Screen", 120)
+        center_smtext("Going to Setup", 120)
         for count in range(5,0, -1):   # Count down from 5 to 1
             display.fill_rect(0, 140, 240, 16, color565(0, 0, 0))  # Clears 1 text line
             center_smtext(f"in {count} seconds", 140)
             time.sleep(1)
         #Print wifi connect error to console
-        print(f"❌ {msg}")
+        print(f"Wifi connect failed {msg}")
         # Log wifi connect error to log file
         logging.error(f"Wi-Fi connect failed: {msg} (status code: {status})")
-        time.sleep(5)
-        os.remove(SETTINGS_FILE)
-        machine_reset()
+        print("Going to setup mode due to Wi-Fi failure.")
+        setup_mode()
+        server.run()
 
 except Exception as e:
     # Log the error
