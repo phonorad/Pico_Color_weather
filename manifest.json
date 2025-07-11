@@ -3,8 +3,8 @@
   "files": {
     "main_app.py": {
       "path": "main_app.py",
-      "sha256": "bbc98fb3287047385af7632d266e1fb4610e92270fd5ecd99823aa6fbb15fa21",
-      "size": 94339
+      "sha256": "8b470ac47ab5dc14cb37297e5fa808adbf3beb1da6504dd342712fc8269e93a0",
+      "size": 95313
     },
     "ap_templates/configured.html": {
       "path": "ap_templates/configured.html",

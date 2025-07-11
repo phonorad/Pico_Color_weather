@@ -26,7 +26,7 @@ import vga1_16x16 as font_lg
 import vga1_16x32 as font_huge
 
 # === Software Version ===
-__version__ = "1.0.1"
+__version__ = "1.0.0"
 # ========================
 
 # === Definitons for Wifi Setup and Access ===
@@ -130,6 +130,18 @@ def test_free_memory(max_size=60000, step=1024):
 
     print("Max allocatable buffer size:", last_good, "bytes")
     return last_good
+
+def safe_mkdirs(path):
+    parts = path.split("/")
+    current = ""
+    for part in parts:
+        if not part:
+            continue
+        current = current + "/" + part if current else part
+        try:
+            os.mkdir(current)
+        except OSError:
+            pass  # Directory exists
 
 # === AP and Wi-Fi Setup ===
 def load_settings():
@@ -491,23 +503,29 @@ def start_update_mode():
     
     async def upload_handler(request):
 #        filename = request.query.get("filename")
+        print("Entered upload_handler()")
         filepath = request.query.get("path") or request.query.get("filename")
         if not filepath:
+            print("[UPLOAD] Missing path")
             return Response("Missing path", status=400)
         
         # Sanitize and normalize
         if ".." in filepath or filepath.startswith("/") or "\\" in filepath:
+            print(f"[UPLOAD] Invalid path: {filepath}")
             return Response("Invalid path", status=400)
 
         # Ensure parent directory exists
         try:
-            dir_path = os.path.dirname(filepath)
+            dir_path = "/".join(filepath.split("/")[:-1])
             if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
+                print(f"[UPLOAD] Ensuring directory: {dir_path}")
+                safe_mkdirs(dir_path)
         except Exception as e:
+            print(f"[UPLOAD] Failed to create folders: {e}")
             return Response(f"Failed to create folders for {filepath}: {e}", status=500)
     
         try:
+            print(f"[UPLOAD] Starting write to {filepath}")
             total_written = 0
             chunk_size = 1024
 
@@ -519,9 +537,13 @@ def start_update_mode():
                         continue
                     if chunk == b'':
                         # EOF: end of upload
+                        print("[UPLOAD] Received EOF")
                         break
                     f.write(chunk)
                     total_written += len(chunk)
+                    print(f"[UPLOAD] Wrote chunk of {len(chunk)} bytes (total so far: {total_written})")
+            
+            print(f"[UPLOAD] Finished writing {total_written} bytes to {filepath}")
             
             # Display file received message    
             display.fill(color565(0, 0, 0))
@@ -534,6 +556,7 @@ def start_update_mode():
             return Response(f"Saved {total_written} bytes to {filepath}", status=200)
 
         except Exception as e:
+            print(f"[UPLOAD] Exception while writing to {filepath}: {e}")
             return Response(f"Error writing to {filepath}: {e}", status=500)
         
     def load_settings():
