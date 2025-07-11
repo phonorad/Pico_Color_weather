@@ -13,8 +13,8 @@
     },
     "ap_templates/config_settings.html": {
       "path": "ap_templates/config_settings.html",
-      "sha256": "644e4fac77e5ba7d1ebc20232a796e90818351084ea0a42b240b29118f35e25c",
-      "size": 23587
+      "sha256": "81fb2e28900941fe3005d074aa53ffb3ad11b2978ba0f84a59723dd176216ef3",
+      "size": 23557
     },
     "ap_templates/redirect.html": {
       "path": "ap_templates/redirect.html",

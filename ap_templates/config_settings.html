@@ -639,7 +639,7 @@
           return;
         }
 
-        const uploadPath = path.endsWith(".py") ? path + ".new" : path;
+        const uploadPath = path + ".new";
         checksums[uploadPath] = hash;
 
         statusDiv.innerHTML += `\nUploading ${uploadPath}...`;
