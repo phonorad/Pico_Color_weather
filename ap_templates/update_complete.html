@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Update Complete</title>
+</head>
+<body>
+  <h1>Software Updated</h1>
+  <p>The device has been updated successfully.</p>
+  <p>It will now restart and run the new version.</p>
+  <p>If it does not restart on its own, try cycling power.</p>
+  
+<script>
+  setTimeout(() => {
+    fetch("/reboot", { method: "POST" });
+  }, 2000);  // wait 2 seconds before telling device to reboot
+</script>
+
+</body>
+</html>

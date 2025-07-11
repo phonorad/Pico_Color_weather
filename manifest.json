@@ -2,8 +2,34 @@
   "version": "1.0.1",
   "files": {
     "main_app.py": {
-      "sha256": "91c825cb7022275a04528c161369ba4519c5c77167d4a1c2ff8ee6f8f6a00698",
-      "path": "main_app.py"
+      "path": "main_app.py",
+      "sha256": "becd4dadfb762524ae7fd6b894ab6e50e4908de39b9b43821fe9aa812c81c93a",
+      "size": 94339
+    },
+    "ap_templates/configured.html": {
+      "path": "ap_templates/configured.html",
+      "sha256": "97b5218ff7ff9565c8d9e713d754484aa3540b4e358001c2bff01f7da50cf49d",
+      "size": 375
+    },
+    "ap_templates/config_settings.html": {
+      "path": "ap_templates/config_settings.html",
+      "sha256": "644e4fac77e5ba7d1ebc20232a796e90818351084ea0a42b240b29118f35e25c",
+      "size": 23587
+    },
+    "ap_templates/redirect.html": {
+      "path": "ap_templates/redirect.html",
+      "sha256": "41447297997b2a9fc1965616e766e14b70860ea846752ae4d395d28a03bbefe7",
+      "size": 303
+    },
+    "ap_templates/update_complete.html": {
+      "path": "ap_templates/update_complete.html",
+      "sha256": "4f8ed61d075eee1eb9c122aa083eb576b1c6d99d54579b58be8b78c0c42155eb",
+      "size": 530
+    },
+    "phew/server.py": {
+      "path": "phew/server.py",
+      "sha256": "752be454eca513decc06f60b08529fa979977f9726c0f0fb45467f8fda2fd935",
+      "size": 17527
     }
   }
 }

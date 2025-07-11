@@ -206,7 +206,7 @@ def load_settings():
 
         buf = uio.StringIO()
         sys.print_exception(e, buf)
-        logging.exception("Settings file error:\n" + buf.getvalue())
+#        logging.exception("Settings file error:\n" + buf.getvalue())
 
         return "corrupt", None, "Settings file corrupt"
 
@@ -490,15 +490,28 @@ def start_update_mode():
         return render_template(f"{AP_TEMPLATE_PATH}/update_complete.html")
     
     async def upload_handler(request):
-        filename = request.query.get("filename")
-        if not filename:
-            return Response("Missing filename", status=400)
+#        filename = request.query.get("filename")
+        filepath = request.query.get("path") or request.query.get("filename")
+        if not filepath:
+            return Response("Missing path", status=400)
+        
+        # Sanitize and normalize
+        if ".." in filepath or filepath.startswith("/") or "\\" in filepath:
+            return Response("Invalid path", status=400)
 
+        # Ensure parent directory exists
+        try:
+            dir_path = os.path.dirname(filepath)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+        except Exception as e:
+            return Response(f"Failed to create folders for {filepath}: {e}", status=500)
+    
         try:
             total_written = 0
             chunk_size = 1024
 
-            with open(filename, "wb") as f:
+            with open(filepath, "wb") as f:
                 while True:
                     chunk = await request.read_body_chunk(chunk_size)
                     if chunk is None:
@@ -514,13 +527,14 @@ def start_update_mode():
             display.fill(color565(0, 0, 0))
             center_lgtext("New Version", 60, color565(0, 255, 0))
             center_lgtext("Received!", 80, color565(0, 255, 0))
-            center_smtext(f"{total_written}B to {filename}", 100)
-            center_smtext("Click OK in broswer", 120)
+            center_smtext(f"{total_written}B to ", 100)
+            center_smtext(filepath, 120)
+            center_smtext("Click OK in browser", 140)
 
-            return Response(f"Saved {total_written} bytes to {filename}", status=200)
+            return Response(f"Saved {total_written} bytes to {filepath}", status=200)
 
         except Exception as e:
-            return Response(f"Error: {e}", status=500)
+            return Response(f"Error writing to {filepath}: {e}", status=500)
         
     def load_settings():
         try:
@@ -1227,6 +1241,29 @@ def get_nws_metadata(lat, lon):
         # Step 1: Get point data for the lat/lon
         print("Fetching point data:", f"https://api.weather.gov/points/{lat},{lon}")
         r = urequests.get(f"https://api.weather.gov/points/{lat},{lon}", headers=headers)
+        
+        if r.status_code == 404:
+            try:
+                err_data = r.json()
+                detail = err_data.get("detail", "").lower()
+                title = err_data.get("title", "").lower()
+                error_type = err_data.get("type", "").lower()
+
+                if (
+                    "outside the forecast area" in detail
+                    or "unable to provide data" in detail
+                    or "invalid point" in title
+                    or "invalidpoint" in error_type
+                ):
+                    return "Location outside US NWS area"
+                else:
+                    return f"NWS error: {detail}"
+            except Exception:
+                return "NWS 404 error"
+
+        if r.status_code != 200:
+            return f"NWS status {r.status_code}"
+        
         raw = r.text
         print("Downloaded length (point data):", len(raw))
         r.close()
@@ -1245,6 +1282,11 @@ def get_nws_metadata(lat, lon):
         # Construct fallback hourly forecast URL if missing
         if not forecast_hourly_url and office and grid_x is not None and grid_y is not None:
             forecast_hourly_url = f"https://api.weather.gov/gridpoints/{office}/{grid_x},{grid_y}/forecast/hourly"
+
+        # ✅ Check for None before fetching observation stations
+        if not obs_station_url:
+            print("No observationStations URL found.")
+            return "NWS metadata error: no station URL"
 
         # Fetch the first observation station ID
         print("Fetching observation stations list:", obs_station_url)
@@ -1433,6 +1475,15 @@ def extract_forecast_periods_stream(response_stream, max_night_periods=3, max_da
 
     return periods
 
+def split_forecast_text(text):
+    """Split a forecast string into two parts if it contains ' then '."""
+    if not text:
+        return "", None
+    parts = text.split(" then ", 1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return text.strip(), None
+
 #def extract_forecast_periods(raw_forecast):
 #    """
 #    Stream-parse raw_forecast JSON text and extract forecast periods.
@@ -1543,21 +1594,39 @@ def get_weather_data(lat, lon, metadata, headers):
 #        unload_all_fonts()
         periods = []
         # Validate cached metadata
-        station_id = metadata.get("station_id")
-        forecast_url = metadata.get("forecast_url")
-        hourly_url = metadata.get("hourly_url")
+        station_id = metadata.get("station_id") if metadata else None
+        forecast_url = metadata.get("forecast_url") if metadata else None
+        hourly_url = metadata.get("hourly_url") if metadata else None
         # Retry fetching metadata if missing
         if not station_id or not forecast_url or not hourly_url:
             print("Metadata incomplete, refreshing metadata...")
-            metadata = get_nws_metadata(lat, lon, headers)
+            metadata = get_nws_metadata(lat, lon)
+            
+            if isinstance(metadata, str):
+                print("Metadata fetch error (non-fatal):", metadata)
+                return [{
+                    "name": "N/A",
+                    "shortForecast": "N/A",
+                    "simpleForecast": "N/A",
+                    "temperature": None,
+                    "isDaytime": None,
+                }]
+            
             if not metadata:
-                print("Failed to refresh metadata.")
-                return None, None, None
+                print("Failed to refresh metadata, returning None")
+                return [{
+                    "name": "N/A",
+                    "shortForecast": "N/A",
+                    "simpleForecast": "N/A",
+                    "temperature": None,
+                    "isDaytime": None,
+                }]
+            
             station_id = metadata.get("station_id")
             forecast_url = metadata.get("forecast_url")
             hourly_url = metadata.get("hourly_url")
 
-        # D0 forecast fetch for multi=day forecast
+        # Do forecast fetch for multi=day forecast
         print("Fetching URL:", forecast_url)
         print("Before fetching forecast JSON:")
         print_memory_usage()
@@ -1584,10 +1653,16 @@ def get_weather_data(lat, lon, metadata, headers):
             test_free_memory()
 
             # Extract multiple forecast periods
-#             periods = extract_forecast_periods(raw_forecast)
             # Post-process each period to simplify forecast and trim name
             for period in periods:
-                period["simpleForecast"] = simplify_forecast(period["shortForecast"])
+                short_forecast = period.get("shortForecast", "")
+                forecast1, forecast2 = split_forecast_text(short_forecast)
+
+                period["forecast1"] = forecast1
+                period["forecast2"] = forecast2 
+                period["simpleForecast"] = simplify_forecast(short_forecast)
+                period["forecast1_short"] = simplify_forecast(forecast1)
+                period["forecast2_short"] = simplify_forecast(forecast2) if forecast2 else None
                 
             if not periods:
                 periods = [{
@@ -1603,6 +1678,11 @@ def get_weather_data(lat, lon, metadata, headers):
                 print(f"Period {i}: name='{period.get('name', '')}'")
                 print(f"Period {i}: shortForecast='{period.get('shortForecast', '')}'")
                 print(f"Period {i}: simpleForecast='{period.get('simpleForecast', '')}'")
+                print(f"Period {i}: forecast1='{period['forecast1']}'")
+                print(f"Period {i}: forecast1_short='{period['forecast1_short']}'")
+                if period['forecast2']:
+                    print(f"          forecast2='{period['forecast2']}'")
+                    print(f"          forecast2_short='{period['forecast2_short']}'")
             print("After extracting forecast periods")
             print_memory_usage()
 
@@ -1614,6 +1694,8 @@ def get_weather_data(lat, lon, metadata, headers):
             periods = [{
                 "name": "N/A",
                 "shortForecast": "N/A",
+                "forecast1": "N/A",
+                "forecast2": None,
                 "simpleForecast": "N/A",
                 "temperature": None,
                 "isDaytime": None,
@@ -1625,12 +1707,16 @@ def get_weather_data(lat, lon, metadata, headers):
     except Exception as e:
         print("Error in get_weather_data:", e)
         sys.print_exception(e)
-        # reload fonts
-#        load_font("sm")
-#        load_font("lg")
-#        load_font("huge")
         
-        return None, None, None
+        return [{
+            "name": "N/A",
+            "shortForecast": "N/A",
+            "forecast1": "N/A",
+            "forecast2": None,
+            "simpleForecast": "N/A",
+            "temperature": None,
+            "isDaytime": None,
+        }]
 
 def shorten_period_name(name):
     """Shorten forecast period names to fit within 14 characters."""
@@ -1668,17 +1754,22 @@ def shorten_period_name(name):
     return name
 
 def simplify_forecast(forecast):
-    MODIFIERS = ["Slight Chance", "Light", "Chance", "Mostly", "Partly", "Likely", "Heavy", "Scattered", "Isolated"]
+    MODIFIERS = ["Slight Chance", "Light", "Chance", "Mostly", "Partly", "Partial",
+                 "Shallow", "Patches", "Patchy", "Likely", "Heavy", "Scattered",
+                 "Isolated", "Drifting", "Blowing", "Few", "Broken", "Widespread",
+                 "Frequent", "Gust", "Gusty", "Intermittent", "Increasing", "Occasional",
+                 "Variable"
+    ]
     CONDITIONS = [
-        "Tornado", "Hailstorm", "Hailstorms", "Blizzard", "Winter Storm", "Winter Weather"
+        "Tornado", "Funnel Cloud", "Hailstorm", "Hailstorms", "Blizzard", "Winter Storm", "Winter Weather"
         "Freezing Rain", "Freezing Drizzle", "Hail", "Sleet", "Ice", "Frost",
-        "Flash Flood", "Flood", "Dust Storm", "Smoke", "Volcanic Ash",
-        "Hurricane", "Tropical storm", "Thunderstorm",
-        "Thunderstorms", "T-storms", "Tstorms",
-        "Storm", "Showers", "Rain",
+        "Flash Flood", "Flood", "Dust Storm", "Smoke", "Volcanic Ash", "Dust", "Spray", "Sand",
+        "Hurricane", "Tropical storm", "Thunderstorms", "Sandstorm",
+        "Thunderstorm", "T-storms", "Tstorms", "Lightning"
+        "Storm", "Squall", "Showers", "Rain", "Precipitation"
         "Fog", "Snow", "Clear", "Sunny",
-        "Cloudy", "Windy", "Gusty", "Wind", "Drizzle",
-        "Haze"
+        "Cloudy", "Overcast", "Windy", "Gusty", "Wind", "Drizzle",
+        "Haze", "Mist", "Snow Grains", "Ice Crystals", "Ice Pellets", "Snow Pellets"
     ]
     # First, make sure there is a valid forecast
     if not forecast or not isinstance(forecast, str):
@@ -1736,6 +1827,28 @@ def simplify_forecast(forecast):
             found_modifier = "Chance"
         if found_modifier.lower() == "scattered":
             found_modifier = "Scattr"
+        if found_modifier.lower() == "partial":
+            found_modifier = "Prtial"
+        if found_modifier.lower() == "shallow":
+            found_modifier = "Shllow"
+        if found_modifier.lower() == "patches":
+            found_modifier = "Patchy"
+        if found_modifier.lower() == "drifting":
+            found_modifier = "Drftng"
+        if found_modifier.lower() == "blowing":
+            found_modifier = "Blowng"
+        if found_modifier.lower() == "widespread":
+            found_modifier = "Wdsprd"
+        if found_modifier.lower() == "frequent":
+            found_modifier = "Frqunt"
+        if found_modifier.lower() == "intermittent":
+            found_modifier = "Intmit"
+        if found_modifier.lower() == "increasing":
+            found_modifier = "Increa"
+        if found_modifier.lower() == "occasional":
+            found_modifier = "Occasl"
+        if found_modifier.lower() == "variable":
+            found_modifier = "Variab"
         # Next check conditions and make 7 chars or less
         if found_condition.lower() =="hailstorm":
             found_condition = "Hailstrm"
@@ -1744,9 +1857,9 @@ def simplify_forecast(forecast):
         if found_condition.lower() =="blizzard":
             found_condition = "Blizzrd"
         if found_condition.lower() =="winter storm":
-            found_condition = "Wint St"
+            found_condition = "Win Stm"
         if found_condition.lower() =="winter weather":
-            found_condition = "Wint Wth"
+            found_condition = "Win Weth"
         if found_condition.lower() =="freezing rain":
             found_condition = "Fr Rain"
         if found_condition.lower() =="freezing drizzle":
@@ -1769,6 +1882,24 @@ def simplify_forecast(forecast):
             found_condition = "Tstorms"
         if found_condition.lower() =="t-storms":
             found_condition = "Tstorms"
+        if found_condition.lower() =="precipitation":
+            found_condition = "Precip"
+        if found_condition.lower() =="funnel cloud":
+            found_condition = "FunlCld"
+        if found_condition.lower() =="sandstorm":
+            found_condition = "SndStrm"
+        if found_condition.lower() =="snow grains":
+            found_condition = "Snw Grs"
+        if found_condition.lower() =="ice crystals":
+            found_condition = "Ice Xtl"
+        if found_condition.lower() =="ice pellets":
+            found_condition = "Ice Plt"
+        if found_condition.lower() =="snow pellets":
+            found_condition = "Snw Plt"
+        if found_condition.lower() =="overcast":
+            found_condition = "Ovrcast"
+        if found_condition.lower() =="lightning":
+            found_condition = "Lightng"
             
     phrase = f"{found_modifier} {found_condition}".strip()
 
@@ -1809,6 +1940,26 @@ def display_weather(interval, temp, humidity, description, is_daytime=None):
         except:
             temp_str = f"{temp}F" # fallback
         center_hugetext(temp_str, 175, color565(255, 100, 100))
+        
+def display_then():
+    # Blank just the icon area and condition text
+#    display.fill_rect(0, 60, 240, 64, color565(0, 0, 0))    # icon area
+    display.fill_rect(0, 140, 240, 32, color565(0, 0, 0))   # forecast text area
+
+#    center_hugetext("Then", 140, color565(150, 200, 255))   # soft blue/cyan
+    center_lgtext("Then", 148, color565(150, 200, 255))   # soft blue/cyan
+    
+def display_forecast2(interval, temp, humidity, description, is_daytime=None):
+    # Same layout as display_weather, but no need to clear entire lower section
+    # Only clear icon and description area
+    display.fill_rect(0, 60, 240, 64, color565(0, 0, 0))    # icon area
+    display.fill_rect(0, 140, 240, 32, color565(0, 0, 0))   # forecast text area
+
+    icon_x = (240 - 63) // 2  # Centered icon
+    draw_weather_icon(display, description, icon_x, 60, is_daytime)
+
+    # Forecast 2 text
+    center_hugetext(description, 140, color565(255, 255, 0))  # same as forecast1
         
 def format_sun_time(t):
     # t is a time.struct_time or tuple like (year, month, day, hour, minute, second, ...)
@@ -1866,6 +2017,18 @@ def application_mode(settings):
     last_displayed_time = ""
     last_displayed_date = ""
     
+    # Forecast update parameters
+    forecast_phase = 0
+    phase_start_time = 0
+    forecast_interval = ""
+    forecast_temp = 0
+    forecast1 = None
+    forecast2 = None
+    forecast_day = None
+    last_forecast_switch = 0
+    cycle_index = 0
+    cycle_length = 0
+    
     # Determine Latitude and Longitude
 #    lat, lon = get_lat_lon(zip_code)
     lat_lon_complete = lat is not None and lon is not None
@@ -1908,6 +2071,25 @@ def application_mode(settings):
     if lat_lon_complete:
         print("Fetching and caching new metadata URLs and station ID...")
         metadata = get_nws_metadata(lat, lon)
+        
+        if isinstance(metadata, str):
+            print("Metadata error:", metadata)
+            if metadata == "Location outside US NWS area":
+                display.fill(0)
+                center_lgtext("Location Error", 80)
+                center_smtext(metadata, 100)
+                center_smtext("Going to Setup Mode", 140)
+                for count in range(5, 0, -1):
+                    display.fill_rect(0, 160, 240, 16, color565(0, 0, 0))
+                    center_smtext(f"in {count} seconds", 160)
+                    time.sleep(1)
+
+                setup_mode()
+                server.run()
+            else:
+                print("Non-fatal metadata error — will proceed with fallback display.")
+                metadata = None  # So downstream logic shows 'weather unavailable'
+        
         if metadata:
             # Save metadata in global variables or a suitable global cache dict
             global cached_forecast_url, cached_hourly_url, cached_station_id
@@ -2012,30 +2194,58 @@ def application_mode(settings):
                     center_lgtext("Unavailable", 100)
             
             last_weather_update = current_time
-
-        # Cycle display every 10 seconds
-        if current_time - last_forecast_switch >= 10:
+        
+        # Start new forecast display cycle every 10s
+        if forecast_phase == 0 and time.time() - last_forecast_switch >= 10:
             print(f"Cycle index: {cycle_index}, Cycle length: {cycle_length}")
+            last_forecast_switch = time.time()  # Mark 10 sec forecast cycle start
+            phase_start_time = last_forecast_switch  # Mark start of inter-forecast interval phase
+            
             if cycle_index == 0:
-                # Show sunrise/sunset
                 display_sun_times(sunrise, sunset)
-
+                forecast_phase = -1  # no follow-up phases
             elif forecasts and (cycle_index - 1) < len(forecasts):
-                forecast = forecasts[cycle_index-1]
-                interval = shorten_period_name(forecast.get("name", "Forecast"))
-                forecast_text = forecast.get("simpleForecast", "N/A")
-                f_temp = forecast.get("temperature") or 0
-                humidity = None
-                is_day = forecast.get("isDaytime", None)
+                forecast = forecasts[cycle_index - 1]
+                forecast_interval = shorten_period_name(forecast.get("name", "Forecast"))
+                forecast_temp = forecast.get("temperature") or 0
+                forecast1 = forecast.get("forecast1_short") or "N/A"
+                forecast2 = forecast.get("forecast2_short")
+                forecast_day = forecast.get("isDaytime", None)
 
-                print(f"Interval: {interval}")
-                print(f"Forecast text: {forecast_text}")
-                display_weather(interval, f_temp, None, forecast_text, is_daytime=is_day)
+                print(f"Interval: {forecast_interval}")
+                print(f"Forecast1: {forecast1}")
+                if forecast2:
+                    print(f"Forecast2: {forecast2}")
+
+                display_weather(forecast_interval, forecast_temp, None, forecast1, is_daytime=forecast_day)
+                forecast_phase = 1 if forecast2 else 3  # skip intermediate phases if no forecast2
             else:
-                # Safety fallback if forecasts not ready
                 display_weather("N/A", None, None, "N/A")
-                    
-            last_forecast_switch = current_time
+                forecast_phase = -1
+
+        # Phase 1: After 4s, show "Then"
+        elif forecast_phase == 1 and time.time() - phase_start_time >= 4:
+            display_then()
+            phase_start_time = time.time()
+            forecast_phase = 2
+
+        # Phase 2: After 2s, show forecast2
+        elif forecast_phase == 2 and time.time() - phase_start_time >= 2:
+            display_forecast2(forecast_interval, forecast_temp, None, forecast2, is_daytime=forecast_day)
+            phase_start_time = time.time()
+            forecast_phase = 3
+
+        # Phase 3: Wait for remainder of 10s, then advance cycle
+        elif forecast_phase == 3 and time.time() - phase_start_time >= 4:
+            forecast_phase = 0
+            cycle_index += 1
+            if cycle_index >= cycle_length:
+                cycle_index = 0
+
+        # Phase -1: used for sunrise/sunset or N/A display, just wait 10s then reset
+        elif forecast_phase == -1 and time.time() - last_forecast_switch >= 10:
+            forecast_phase = 0
+#            last_forecast_switch = time.time()
             cycle_index += 1
             if cycle_index >= cycle_length:
                 cycle_index = 0
@@ -2043,7 +2253,7 @@ def application_mode(settings):
         # Get localtime *once* per loop
         now = localtime_with_offset()
         current_time_str = format_12h_time(now)
-        current_date_str = "{} {:02}".format(MONTHS[now[1]-1], now[2])
+        current_date_str = "{} {}".format(MONTHS[now[1]-1], now[2])
         
         # Update time display every second
         if current_time_str != last_displayed_time:
@@ -2197,7 +2407,7 @@ try:
         #Print wifi connect error to console
         print(f"Wifi connect failed {msg}")
         # Log wifi connect error to log file
-        logging.error(f"Wi-Fi connect failed: {msg} (status code: {status})")
+#         logging.error(f"Wi-Fi connect failed: {msg} (status code: {status})")
         print("Going to setup mode due to Wi-Fi failure.")
         setup_mode()
         server.run()
@@ -2206,9 +2416,9 @@ except Exception as e:
     # Log the error
     buf = uio.StringIO()
     sys.print_exception(e, buf)
-    logging.exception(buf.getvalue())
+#     logging.exception(buf.getvalue())
     
-    logging.info("Restarting device in 2 seconds...")
+#     logging.info("Restarting device in 2 seconds...")
     time.sleep(2)
     machine.reset()
     

@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Peony and Lemon Forecaster - Settings</title>
+  
+  <script>
+    window.setupMode = false;
+  </script>
+  
+  <style>
+    /* ... your existing CSS unchanged ... */
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      margin: 0;
+      background: #fff;
+      color: #000;
+    }
+
+    fieldset {
+      border: 1px solid #ccc;
+      padding: 1.5em;
+      max-width: 480px;
+      margin: auto 0 2em;
+      border-radius: 6px;
+      background: #fafafa;
+    }
+
+    legend {
+      font-weight: 700;
+      padding: 0 0.5em;
+      font-size: 1.1em;
+      color: #333;
+    }
+
+    /* Separate fieldsets for each group */
+    #wifi-settings,
+    #location-settings,
+    #timezone-settings {
+      margin-bottom: 1.5em;
+      padding: 1em;
+      border: 1px solid #bbb;
+      border-radius: 4px;
+      background: #fff;
+    }
+
+    label {
+      display: block;
+      margin-top: 1em;
+      font-weight: 600;
+      font-size: 1rem;
+    }
+
+    /* Slightly increased line spacing */
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    select {
+      width: 100%;
+      max-width: 320px;
+      padding: 8px 10px;
+      margin-top: 0.3em;
+      box-sizing: border-box;
+      font-size: 1rem;
+      line-height: 1.4;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      transition: border-color 0.3s ease;
+    }
+
+    input[type="text"]:focus,
+    input[type="password"]:focus,
+    input[type="number"]:focus,
+    select:focus {
+      border-color: #0078d4;
+      outline: none;
+      background: #f0f8ff;
+    }
+
+    /* Inline radios and checkboxes */
+    label > input[type="radio"],
+    label > input[type="checkbox"] {
+      margin-right: 0.5em;
+      vertical-align: middle;
+      cursor: pointer;
+    }
+
+    /* Container for password + show checkbox */
+    .flex-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5em;
+      max-width: 320px;
+      margin-top: 0.3em;
+    }
+
+    .flex-row input[type="password"] {
+      flex: 1 1 auto;
+    }
+
+    /* Show password label */
+    label[for="show-password-checkbox"] {
+      cursor: pointer;
+      user-select: none;
+      font-weight: normal;
+      font-size: 0.9rem;
+      white-space: nowrap;
+    }
+
+    /* Buttons consistent style */
+    button {
+      padding: 10px 20px;
+      margin-top: 1.5em;
+      font-size: 1rem;
+      cursor: pointer;
+      border: 1px solid #666;
+      background: #f0f0f0;
+      border-radius: 4px;
+      transition: background 0.3s ease;
+    }
+
+    button:hover:not(:disabled) {
+      background: #ddd;
+    }
+
+    button:disabled {
+      background: #ddd;
+      cursor: not-allowed;
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 480px) {
+      fieldset {
+        padding: 1em;
+        max-width: 100%;
+      }
+
+      input[type="text"],
+      input[type="password"],
+      input[type="number"],
+      select,
+      .flex-row {
+        max-width: 100%;
+      }
+    }
+
+    /* Small note text */
+    small {
+      font-weight: normal;
+      color: #666;
+      margin-left: 0.25em;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>PL Forecaster Settings</h1>
+
+  <form id="settings-form" autocomplete="off" autocapitalize="none" method="POST" action="/settings">
+
+    <fieldset id="wifi-settings">
+      <legend>Wi-Fi Settings</legend>
+      <label for="ssid">Wi-Fi Network Name / SSID: <small>(case sensitive)</small></label>
+      <input type="text" id="ssid" name="ssid" autocomplete="off" />
+
+      <label for="password">Wi-Fi Password: <small>(case sensitive)</small></label>
+      <div class="flex-row">
+        <input
+          type="password"
+          id="password"
+          name="password"
+          autocomplete="new-password"
+          aria-describedby="password-note"
+        />
+        <label for="show-password-checkbox">
+          <input type="checkbox" id="show-password-checkbox" />
+          Show
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset id="location-settings">
+      <legend>Location Settings</legend>
+      <label>
+        <input type="radio" name="location_source" value="zip" id="source-zip" />
+        Use Zip Code
+      </label>
+      <label>
+        <input type="radio" name="location_source" value="latlon" id="source-latlon" />
+        Use Latitude / Longitude
+      </label>
+
+      <div id="zip-container">
+        <label for="zip">Zip Code:</label>
+        <input type="text" id="zip" name="zip" autocomplete="postal-code" />
+      </div>
+
+      <div id="latlon-container">
+        <label for="lat">
+          Latitude: (Input as decimal degrees)<br>
+          <small>Example: 38.7946</small>
+        </label>
+        <input type="text" id="lat" name="lat" autocomplete="off" />
+        <label for="lon">
+          Longitude: (Input as negative decimal degrees)<br>
+          <small>Example: -106.5348</small>
+        </label>
+        <input type="text" id="lon" name="lon" autocomplete="off" />
+      </div>
+    </fieldset>
+
+    <fieldset id="timezone-settings">
+      <legend>Timezone Settings</legend>
+      <label for="timezone">Timezone:</label>
+      <select id="timezone" name="timezone" required>
+        <option value="" disabled selected>Select your timezone</option>
+        <option value="Eastern">Eastern (ET)</option>
+        <option value="Central">Central (CT)</option>
+        <option value="Mountain">Mountain (MT)</option>
+        <option value="Pacific">Pacific (PT)</option>
+        <option value="Alaska">Alaska (AKT)</option>
+        <option value="Hawaii">Hawaii (HST)</option>
+        <option value="Manual">Manual GMT Offset</option>
+      </select>
+
+      <label>
+        <input type="checkbox" id="dst" name="use_dst" />
+        Use Daylight Saving Time
+      </label>
+
+      <div id="manual_offset_container" style="display:none;">
+        <label for="manual_offset">Manual GMT Offset (hours):</label>
+        <input type="number" id="manual_offset" name="manual_offset" min="-12" max="14" step="0.5" />
+      </div>
+    </fieldset>
+
+    <button type="submit" id="save-settings-btn" disabled>Save Settings</button>
+    <button type="button" id="cancel-settings-btn">Cancel</button>
+  </form>
+
+  <hr>
+
+  <!-- Software Update Container -->
+  <div id="update-container">
+    <hr>
+    <p>Check for software updates.</p>
+    <button onclick="checkForUpdate()">Check for Updates</button>
+
+    <progress id="progress" max="100" value="0"></progress>
+    <div id="update-status"></div>
+
+    <div id="ok-container">
+      <button onclick="confirmContinue()" id="ok-button" disabled>OK</button>
+    </div>
+  </div>
+
+<script>
+  // Settings form references
+  const form = document.getElementById('settings-form');
+  const zip = document.getElementById('zip');
+  const lat = document.getElementById('lat');
+  const lon = document.getElementById('lon');
+  const timezone = document.getElementById('timezone');
+  const manualOffset = document.getElementById('manual_offset');
+  const dstCheckbox = document.getElementById('dst');
+  const manualOffsetContainer = document.getElementById('manual_offset_container');
+  const saveBtn = document.getElementById('save-settings-btn');
+  const sourceZipRadio = document.getElementById('source-zip');
+  const sourceLatLonRadio = document.getElementById('source-latlon');
+
+  // Elements to toggle based on setupMode
+  const wifiSettingsContainer = document.getElementById('wifi-settings');
+  const updateContainer = document.getElementById('update-container');
+
+  // Show/hide password checkbox and password input
+  const showPwdCheckbox = document.getElementById('show-password-checkbox');
+  const pwdField = document.getElementById('password');
+
+  // Update location input enable/disable based on radio buttons
+  function updateLocationSourceDisplay() {
+    if (sourceZipRadio.checked) {
+      zip.disabled = false;
+      lat.disabled = true;
+      lon.disabled = true;
+    } else if (sourceLatLonRadio.checked) {
+      zip.disabled = true;
+      lat.disabled = false;
+      lon.disabled = false;
+    }
+    validateForm();
+  }
+
+  // Show/hide manual offset input
+  function updateManualOffsetDisplay() {
+    if (timezone.value.toLowerCase() === 'manual') {
+      manualOffsetContainer.style.display = "block";
+    } else {
+      manualOffsetContainer.style.display = "none";
+      manualOffset.value = '';
+    }
+  }
+
+  // Validate form enable state
+  function validateForm() {
+    let locationValid = false;
+    if (sourceZipRadio.checked) {
+      locationValid = zip.value.trim() !== '';
+    } else if (sourceLatLonRadio.checked) {
+      locationValid = lat.value.trim() !== '' && lon.value.trim() !== '';
+    }
+    const timezoneValid = timezone.value !== '';
+    saveBtn.disabled = !(locationValid && timezoneValid);
+  }
+
+  // Populate form from server settings (called after settings are fetched)
+  function populateForm(settings) {
+    if (settings.location_source === 'latlon') {
+      sourceLatLonRadio.checked = true;
+    } else {
+      sourceZipRadio.checked = true;
+    }
+
+    zip.value = settings.zip || '';
+    lat.value = settings.lat || '';
+    lon.value = settings.lon || '';
+    timezone.value = settings.timezone || '';
+    dstCheckbox.checked = (settings.use_dst === "true" || settings.use_dst === true || settings.use_dst === "on");
+
+    if (settings.manual_offset !== undefined) {
+      manualOffset.value = settings.manual_offset;
+    } else {
+      manualOffset.value = '';
+    }
+
+    // Populate Wi-Fi fields only if in setup mode
+    if (window.setupMode) {
+      document.getElementById("ssid").value = settings.ssid || '';
+      pwdField.value = settings.password || '';
+    }
+
+    updateLocationSourceDisplay();
+    updateManualOffsetDisplay();
+    validateForm();
+  }
+
+  // Load settings from server and populate form
+  async function loadSettings() {
+    try {
+      const res = await fetch('/settings');
+      if (!res.ok) throw new Error("Failed to load settings");
+      const data = await res.json();
+      populateForm(data);
+    } catch (e) {
+      console.error("Error loading settings:", e);
+    }
+  }
+
+  // Setup event listeners (only once)
+  function setupEventListeners() {
+    sourceZipRadio.addEventListener('change', updateLocationSourceDisplay);
+    sourceLatLonRadio.addEventListener('change', updateLocationSourceDisplay);
+    zip.addEventListener('input', validateForm);
+    lat.addEventListener('input', validateForm);
+    lon.addEventListener('input', validateForm);
+    timezone.addEventListener('change', () => {
+      updateManualOffsetDisplay();
+      validateForm();
+    });
+    manualOffset.addEventListener('input', validateForm);
+    dstCheckbox.addEventListener('change', validateForm);
+
+    form.addEventListener('submit', (event) => {
+      // --- Wi-Fi SSID (only required in setup mode) ---
+      if (window.setupMode) {
+        const ssid = form.ssid.value.trim();
+        if (!ssid) {
+          alert("Wi-Fi SSID cannot be blank.");
+          form.ssid.focus();
+          event.preventDefault();
+          return;
+        }
+      }
+
+      // --- Location Validation ---
+      if (sourceZipRadio.checked) {
+        const zipVal = zip.value.trim();
+        if (!/^\d{5}$/.test(zipVal)) {
+          alert("Please enter a valid 5-digit ZIP code.");
+          zip.focus();
+          event.preventDefault();
+          return;
+        }
+      } else if (sourceLatLonRadio.checked) {
+        const latStr = lat.value.trim();
+        const lonStr = lon.value.trim();
+        let latVal = parseFloat(latStr);
+        let lonVal = parseFloat(lonStr);
+
+        if (latStr === "" || lonStr === "") {
+          alert("Please enter both Latitude and Longitude.");
+          event.preventDefault();
+          return;
+        }
+
+        if (isNaN(latVal) || isNaN(lonVal)) {
+          alert("Latitude and Longitude must be valid decimal numbers.");
+          event.preventDefault();
+          return;
+        }
+
+        // Basic global bounds
+        const validLat = latVal >= -90 && latVal <= 90;
+        const validLon = lonVal >= -180 && lonVal <= 180;
+
+        if (!validLat || !validLon) {
+          alert("Latitude must be between -90 and 90, Longitude between -180 and 180.");
+          event.preventDefault();
+          return;
+        }
+
+        // Optional: warn if lat/lon reversed (common user mistake)
+        if (latVal < 0 && lonVal > 0) {
+          alert("Latitude and Longitude may be reversed. Latitude is usually positive in the US, and Longitude negative.");
+          event.preventDefault();
+          return;
+        }
+
+        // Optional: warn if obviously outside US bounds
+        const likelyUSLat = latVal >= 18 && latVal <= 72;
+        const likelyUSLon = lonVal <= -65 && lonVal >= -175;
+        if (!likelyUSLat || !likelyUSLon) {
+          if (!confirm("These coordinates appear to be outside the US. Continue anyway?")) {
+            event.preventDefault();
+            return;
+          }
+        }
+
+        // Normalize and round for consistency
+        latVal = Math.round(latVal * 10000) / 10000;
+        lonVal = Math.round(lonVal * 10000) / 10000;
+        lat.value = latVal.toFixed(4);
+        lon.value = lonVal.toFixed(4);
+      }
+
+      // --- Timezone must be selected ---
+      if (!timezone.value || timezone.value === "select") {
+        alert("Please select a timezone.");
+        timezone.focus();
+        event.preventDefault();
+        return;
+      }
+
+      // Clear unused location fields before submit
+      if (sourceZipRadio.checked) {
+        lat.disabled = false; // enable so empty values are sent
+        lon.disabled = false;
+        lat.value = '';
+        lon.value = '';
+      } else {
+        zip.disabled = false;
+        zip.value = '';
+      }
+    });
+
+    document.getElementById('cancel-settings-btn').addEventListener('click', async () => {
+      await loadSettings();
+      updateLocationSourceDisplay();
+      updateManualOffsetDisplay();
+      validateForm();
+    });
+
+    if (showPwdCheckbox && pwdField) {
+      showPwdCheckbox.addEventListener('change', () => {
+        pwdField.type = showPwdCheckbox.checked ? "text" : "password";
+      });
+    }
+  }
+
+  // Initialize UI on page load
+  window.addEventListener('DOMContentLoaded', () => {
+    // Show/hide containers based on setupMode flag
+    if (window.setupMode) {
+      wifiSettingsContainer.style.display = 'block';
+      updateContainer.style.display = 'none';
+    } else {
+      wifiSettingsContainer.style.display = 'none';
+      updateContainer.style.display = 'block';
+    }
+
+    setupEventListeners();
+    loadSettings();
+  });
+</script>
+
+<script>
+  const GITHUB_BASE = "https://raw.githubusercontent.com/phonorad/pl_forecaster/main";
+
+  // Minimal SHA-256 implementation (c) Chris Veness
+  // Source: https://gist.github.com/chrisveness/b84b0db6990f5f6bb824
+
+  function sha256(buffer) {
+    const K = new Uint32Array([
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,
+      0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,
+      0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,
+      0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,
+      0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,
+      0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,
+      0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,
+      0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,
+      0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,
+      0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,
+      0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
+      0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+
+    function ROTR(n,x) { return (x>>>n) | (x<<(32-n)); }
+    function bigSigma0(x) { return ROTR(2,x)^ROTR(13,x)^ROTR(22,x); }
+    function bigSigma1(x) { return ROTR(6,x)^ROTR(11,x)^ROTR(25,x); }
+    function smallSigma0(x) { return ROTR(7,x)^ROTR(18,x)^(x>>>3); }
+    function smallSigma1(x) { return ROTR(17,x)^ROTR(19,x)^(x>>>10); }
+
+    function toHexStr(n) {
+      let s = "", v;
+      for (let i=7; i>=0; --i) {
+        v = (n >>> (i*4)) & 0x0f;
+        s += v.toString(16);
+      }
+      return s;
+    }
+
+    // Convert ArrayBuffer to byte array
+    let bytes = new Uint8Array(buffer);
+
+    // Pre-processing (Padding)
+    let l = bytes.length;
+    let paddedLen = (((l + 9) + 63) >> 6) << 6;
+    let withOne = new Uint8Array(paddedLen);
+    withOne.set(bytes);
+    withOne[l] = 0x80;  // append 1 bit followed by zeros
+
+    // Append original message length in bits (big endian, 64-bit)
+    let bitLen = BigInt(l) * 8n;
+    for (let i = 0; i < 8; i++) {
+      withOne[withOne.length - 1 - i] = Number((bitLen >> BigInt(i * 8)) & 0xffn);
+    }
+
+    let H = new Uint32Array([
+      0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+      0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+
+    let W = new Uint32Array(64);
+    for (let i=0; i<withOne.length; i += 64) {
+      for (let t=0; t<16; ++t) {
+        W[t] = (withOne[i+4*t]<<24) | (withOne[i+4*t+1]<<16) | (withOne[i+4*t+2]<<8) | (withOne[i+4*t+3]);
+      }
+      for (let t=16; t<64; ++t) {
+        W[t] = (smallSigma1(W[t-2]) + W[t-7] + smallSigma0(W[t-15]) + W[t-16]) >>> 0;
+      }
+
+      let a=H[0], b=H[1], c=H[2], d=H[3], e=H[4], f=H[5], g=H[6], h=H[7];
+
+      for (let t=0; t<64; ++t) {
+        let T1 = (h + bigSigma1(e) + ((e & f) ^ (~e & g)) + K[t] + W[t]) >>> 0;
+        let T2 = (bigSigma0(a) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+        h=g; g=f; f=e; e=(d + T1) >>> 0; d=c; c=b; b=a; a=(T1 + T2) >>> 0;
+      }
+
+      H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+      H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+    }
+
+    return Array.from(H).map(toHexStr).join('');
+  }
+
+  async function checkForUpdate() {
+    const statusDiv = document.getElementById("update-status");
+    const okContainer = document.getElementById("ok-container");
+    const progress = document.getElementById("progress");
+    statusDiv.innerHTML = "Checking for updates...";
+    okContainer.style.display = "none";
+    progress.value = 0;
+
+    try {
+      const picoResponse = await fetch("/version");
+      const picoVersion = (await picoResponse.text()).trim();
+
+      const githubResponse = await fetch(`${GITHUB_BASE}/version.txt?nocache=${Date.now()}`);
+      const githubVersion = (await githubResponse.text()).trim();
+
+      if (picoVersion === githubVersion) {
+        statusDiv.innerHTML = `You are running the latest version: ${picoVersion}`;
+        okContainer.style.display = "block";
+      } else {
+        statusDiv.innerHTML =
+          `Update available!\n\nCurrent version: ${picoVersion}\nLatest version: ${githubVersion}\n\n` +
+          `<button onclick="updateFirmware()">Update Now</button>`;
+      }
+    } catch (err) {
+      statusDiv.innerHTML = "Error checking version: " + err;
+    }
+  }
+
+  async function updateFirmware() {
+    const statusDiv = document.getElementById("update-status");
+    const progress = document.getElementById("progress");
+    const okContainer = document.getElementById("ok-container");
+    statusDiv.innerHTML = "Fetching update manifest...";
+    okContainer.style.display = "none";
+    progress.value = 0;
+
+    try {
+      const manifestResponse = await fetch(`${GITHUB_BASE}/manifest.json?nocache=${Date.now()}`);
+      const manifest = await manifestResponse.json();
+      const files = manifest.files;
+      const entries = Object.entries(files);
+      const total = entries.length;
+      let uploaded = 0;
+      const checksums = {};
+
+      for (let i = 0; i < total; i++) {
+        const [filename, meta] = entries[i];
+        const path = meta.path;
+        const url = path.startsWith("http") ? path : `${GITHUB_BASE}/${path}`;
+          
+        statusDiv.innerHTML += `\n\nDownloading ${path}...`;
+        console.log(`Fetching ${url}`);
+        const res = await fetch(url);
+        const blob = await res.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const hash = sha256(arrayBuffer);
+        console.log(`Length of ${path} buffer: ${arrayBuffer.byteLength}`);
+        console.log(`SHA256 for ${path}: ${hash}`);
+
+        if (hash !== meta.sha256) {
+          statusDiv.innerHTML += `\n Checksum mismatch for ${path}. Skipping update.`;
+          return;
+        }
+
+        const uploadPath = path.endsWith(".py") ? path + ".new" : path;
+        checksums[uploadPath] = hash;
+
+        statusDiv.innerHTML += `\nUploading ${uploadPath}...`;
+        const uploadRes = await fetch(`/upload?path=${encodeURIComponent(uploadPath)}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/octet-stream"
+          },
+          body: blob
+        });
+
+        const result = await uploadRes.text();
+        if (uploadRes.ok) {
+          statusDiv.innerHTML += `\n Uploaded ${uploadPath}`;
+          uploaded++;
+        } else {
+          statusDiv.innerHTML += `\n Failed to upload ${uploadPath}: ${result}`;
+          return;
+        }
+
+        progress.value = (uploaded / total) * 100;
+      }
+
+      // Upload checksums
+      statusDiv.innerHTML += `\n\nSending checksums...`;
+      const checksumRes = await fetch("/checksums", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(checksums)
+      });
+
+      if (!checksumRes.ok) {
+        const text = await checksumRes.text();
+        statusDiv.innerHTML += `\n Failed to send checksums: ${text}`;
+        return;
+      }
+
+      // Finalize the update
+      statusDiv.innerHTML += `\nFinalizing update...`;
+      const finalizeRes = await fetch("/finalize", { method: "POST" });
+      const finalText = await finalizeRes.text();
+
+      if (!finalizeRes.ok) {
+        statusDiv.innerHTML += `\n Finalize failed: ${finalText}`;
+        return;
+      }
+
+      statusDiv.innerHTML += `\n Update complete. ${uploaded} files verified and installed.\nClick OK to reboot.`;
+      progress.value = 100;
+      document.getElementById("ok-button").disabled = false;
+      okContainer.style.display = "block";
+
+  } catch (err) {
+      statusDiv.innerHTML += `\n Update failed: ${err}`;
+    }
+  }
+
+  async function confirmContinue() {
+    console.log("confirmContinue() called");
+    try {
+      document.getElementById("ok-button").disabled = true;
+      const response = await fetch("/continue", { method: "POST" });
+      if (!response.ok) {
+        document.getElementById("update-status").innerHTML = "Error: " + response.status;
+        return;
+      }
+      window.location.href = "/update_complete.html";
+    } catch (err) {
+      document.getElementById("update-status").innerHTML = "Error during reboot: " + err;
+    }
+  }
+</script>
+
+</body>
+</html>
